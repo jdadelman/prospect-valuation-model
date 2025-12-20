@@ -1,0 +1,56 @@
+# ================================================================
+# Data artifacts (never commit)
+# ================================================================
+
+# Raw data snapshots (HTML, API dumps, exports)
+data/raw/
+
+# Intermediate parsed data (human-readable but derived)
+data/intermediate/
+
+# Canonical processed tables
+data/processed/
+
+# Feature matrices, embeddings, token caches
+data/features/
+
+
+# ================================================================
+# Python artifacts
+# ================================================================
+
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+
+# ================================================================
+# Environment / secrets
+# ================================================================
+
+.env
+.env.*
+
+
+# ================================================================
+# OS / editor noise
+# ================================================================
+
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+
+# ================================================================
+# Logs / temporary outputs
+# ================================================================
+
+*.log
+tmp/
