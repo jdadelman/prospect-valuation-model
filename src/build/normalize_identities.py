@@ -4,6 +4,7 @@ import hashlib
 import re
 from collections import defaultdict
 from dataclasses import dataclass
+from datetime import date, timedelta
 from pathlib import Path
 from statistics import mean
 from typing import Iterable, Optional
@@ -178,6 +179,52 @@ def parse_float(s: str) -> Optional[float]:
         return None
 
 
+def parse_date_ymd(s: str) -> Optional[date]:
+    """
+    Accepts:
+      - YYYY-MM-DD
+      - YYYY-MM-DDTHH:MM:SS...
+    Returns date or None.
+    """
+    s = (s or "").strip()
+    if not s:
+        return None
+    s = s.split("T", 1)[0]
+    parts = s.split("-")
+    if len(parts) < 3:
+        return None
+    y, m, d = parts[0].strip(), parts[1].strip(), parts[2].strip()
+    if not (y.isdigit() and m.isdigit() and d.isdigit()):
+        return None
+    try:
+        return date(int(y), int(m), int(d))
+    except ValueError:
+        return None
+
+
+def estimate_dob_from_pub_and_age(published_date_latest: str, age_float: str) -> tuple[str, str]:
+    """
+    Estimate DOB and YOB from a publication date and decimal age.
+
+    dob_est ≈ pub_date - round(age_years * 365.2425 days)
+
+    Returns:
+      (dob_est_ymd, yob_est)
+    or ("","") if inputs insufficient.
+    """
+    pub = parse_date_ymd(published_date_latest)
+    age = parse_float(age_float)
+    if pub is None or age is None:
+        return "", ""
+
+    if age <= 0.0 or age >= 60.0:
+        return "", ""
+
+    days = int(round(age * 365.2425))
+    dob_est = pub - timedelta(days=days)
+    return dob_est.isoformat(), str(dob_est.year)
+
+
 def build_identities(reports_dir: Path) -> list[IdentityAgg]:
     by_key: dict[str, IdentityAgg] = {}
 
@@ -280,8 +327,10 @@ def write_identities(identities: list[IdentityAgg], out_path: Path) -> None:
         "org_labels",
         "org_abbrevs",
         "published_date_latest",
-        "age_mean",
+        "age_float",
         "age_samples",
+        "dob_est_ymd",
+        "yob_est",
         "source_files_count",
     ]
 
@@ -290,9 +339,13 @@ def write_identities(identities: list[IdentityAgg], out_path: Path) -> None:
         w.writeheader()
         for a in identities:
             published_latest = max(a.published_dates) if a.published_dates else ""
-            age_mean = f"{mean(a.ages):.3f}" if a.ages else ""
+            age_float = f"{mean(a.ages):.3f}" if a.ages else ""
             age_samples = "|".join(f"{x:.3f}" for x in sorted(a.ages)) if a.ages else ""
 
+            dob_est_ymd, yob_est = ("", "")
+            if published_latest and age_float:
+                dob_est_ymd, yob_est = estimate_dob_from_pub_and_age(published_latest, age_float)
+            
             w.writerow(
                 {
                     "identity_key": a.identity_key,
@@ -306,8 +359,10 @@ def write_identities(identities: list[IdentityAgg], out_path: Path) -> None:
                     "org_labels": " | ".join(sorted(a.org_labels)),
                     "org_abbrevs": "|".join(sorted(a.org_abbrevs)),
                     "published_date_latest": published_latest,
-                    "age_mean": age_mean,
+                    "age_float": age_float,
                     "age_samples": age_samples,
+                    "dob_est_ymd": dob_est_ymd,
+                    "yob_est": yob_est,
                     "source_files_count": str(len(a.source_files)),
                 }
             )

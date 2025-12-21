@@ -2,7 +2,7 @@ import argparse
 import csv
 import unicodedata
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable, Optional
 
@@ -58,6 +58,23 @@ def parse_ymd_from_iso(s: str) -> tuple[str, str, str]:
     return "", "", ""
 
 
+def parse_date_ymd(s: str) -> Optional[date]:
+    s = (s or "").strip()
+    if not s:
+        return None
+    s = s.split("T", 1)[0]
+    parts = s.split("-")
+    if len(parts) < 3:
+        return None
+    y, m, d = parts[0].strip(), parts[1].strip(), parts[2].strip()
+    if not (y.isdigit() and m.isdigit() and d.isdigit()):
+        return None
+    try:
+        return date(int(y), int(m), int(d))
+    except ValueError:
+        return None
+
+
 def parse_float(s: str) -> Optional[float]:
     s = (s or "").strip()
     if not s:
@@ -79,8 +96,9 @@ class IdentityRow:
     dob: str
     org_abbrevs: str
     published_date_latest: str
-    age_mean: str
-
+    age_float: str
+    dob_est_ymd: str
+    yob_est: str
 
 @dataclass(frozen=True)
 class SpineRow:
@@ -134,9 +152,12 @@ def read_identities(path: Path) -> list[IdentityRow]:
                 dob=dob,
                 org_abbrevs=(row.get("org_abbrevs") or "").strip(),
                 published_date_latest=(row.get("published_date_latest") or "").strip(),
-                age_mean=(row.get("age_mean") or "").strip(),
+                age_float=(row.get("age_float") or "").strip(),
+                dob_est_ymd=(row.get("dob_est_ymd") or "").strip(),
+                yob_est=(row.get("yob_est") or "").strip(),
             )
         )
+    
     return out
 
 
@@ -209,6 +230,30 @@ def unique_or_none(ids: list[str]) -> Optional[str]:
     return None
 
 
+def tie_break_by_estimated_dob(
+    cand_ids: list[str],
+    ident_dob_est_ymd: str,
+    spine_dob_by_id: dict[str, Optional[date]],
+    tolerance_days: int = 45,
+) -> Optional[str]:
+    """
+    Tie-break by proximity between identity's estimated DOB and MLBAM DOB.
+    Only acts if it yields a unique candidate.
+    """
+    dob_est = parse_date_ymd(ident_dob_est_ymd)
+    if dob_est is None:
+        return None
+    hits: list[str] = []
+    for cid in sorted(set(cand_ids)):
+        dob_c = spine_dob_by_id.get(cid)
+        if dob_c is None:
+            continue
+        if abs((dob_c - dob_est).days) <= tolerance_days:
+            hits.append(cid)
+    hits = sorted(set(hits))
+    return hits[0] if len(hits) == 1 else None
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description="Build FG identity → MLBAM ID crosswalk using MLBAM people spine.")
     ap.add_argument("--identities", default="data/processed/player_identities.csv", help="Input identities CSV.")
@@ -235,6 +280,7 @@ def main() -> None:
 
     spine_yob_by_id: dict[str, str] = {}
     spine_orgs_by_id: dict[str, set[str]] = {}
+    spine_dob_by_id: dict[str, Optional[date]] = {}
 
     for s in spine:
         fn = norm_text(s.name_first)
@@ -245,7 +291,10 @@ def main() -> None:
         if y and m and d:
             add_to_index(idx_first_last_dob, (fn, ln, y, m, d), s.mlbam_id)
             add_to_index(idx_last_dob, (ln, y, m, d), s.mlbam_id)
-
+            spine_dob_by_id[s.mlbam_id] = parse_date_ymd(f"{y}-{m}-{d}")
+        else:
+            spine_dob_by_id[s.mlbam_id] = None
+        
         if full:
             add_to_index(idx_full_name, (full,), s.mlbam_id)
 
@@ -274,7 +323,9 @@ def main() -> None:
         "identity_dob",
         "identity_org_abbrevs",
         "identity_published_date_latest",
-        "identity_age_mean",
+        "identity_age_float",
+        "identity_dob_est_ymd",
+        "identity_yob_est",
     ]
 
     with out_path.open("w", newline="", encoding="utf-8") as f:
@@ -336,21 +387,31 @@ def main() -> None:
                             match_method = "name_plus_org_unique"
                             match_status = "matched_name_with_tiebreak"
 
-                    if chosen is None and ident.published_date_latest and ident.age_mean and cand_unique:
-                        age = parse_float(ident.age_mean)
-                        if age is not None:
-                            pub_y, _, _ = parse_ymd_from_iso(ident.published_date_latest)
-                            if pub_y.isdigit():
-                                est_yob = int(pub_y) - int(age)  # coarse, expected +/- 1
-                                hits = []
-                                for cid in cand_unique:
-                                    yob_c = spine_yob_by_id.get(cid, "")
-                                    if yob_c.isdigit() and abs(int(yob_c) - est_yob) <= 1:
-                                        hits.append(cid)
-                                if len(hits) == 1:
-                                    chosen = hits[0]
-                                    match_method = "name_plus_est_yob_unique"
-                                    match_status = "matched_name_with_tiebreak"
+                    if chosen is None and cand_unique:
+                        # Prefer estimated DOB proximity (day-level)
+                        chosen = tie_break_by_estimated_dob(
+                            cand_ids=cand_unique,
+                            ident_dob_est_ymd=ident.dob_est_ymd,
+                            spine_dob_by_id=spine_dob_by_id,
+                            tolerance_days=45,
+                        )
+                        if chosen is not None:
+                            match_method = "name_plus_est_dob_unique"
+                            match_status = "matched_name_with_tiebreak"
+
+                    if chosen is None and cand_unique and ident.yob_est and ident.yob_est.isdigit():
+                        # Fallback: estimated YOB (year-level, +/-1)
+                        est_yob = int(ident.yob_est)
+                        hits = []
+                        for cid in cand_unique:
+                            yob_c = spine_yob_by_id.get(cid, "")
+                            if yob_c.isdigit() and abs(int(yob_c) - est_yob) <= 1:
+                                hits.append(cid)
+                        hits = sorted(set(hits))
+                        if len(hits) == 1:
+                            chosen = hits[0]
+                            match_method = "name_plus_est_yob_unique"
+                            match_status = "matched_name_with_tiebreak"
 
                     if chosen:
                         mlbam_id = chosen
@@ -386,7 +447,9 @@ def main() -> None:
                     "identity_dob": d,
                     "identity_org_abbrevs": ident.org_abbrevs,
                     "identity_published_date_latest": ident.published_date_latest,
-                    "identity_age_mean": ident.age_mean,
+                    "identity_age_float": ident.age_float,
+                    "identity_dob_est_ymd": ident.dob_est_ymd,
+                    "identity_yob_est": ident.yob_est,
                 }
             )
 
