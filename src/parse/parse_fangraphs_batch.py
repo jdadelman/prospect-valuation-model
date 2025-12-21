@@ -12,6 +12,8 @@ if str(REPO_ROOT) not in sys.path:
 
 from src.parse.parse_fangraphs_reports import (
     extract_canonical_url,
+    extract_date_published,
+    report_year_from_published,
     extract_org_label,
     infer_report_year_from_url,
     parse_report_blocks,
@@ -90,9 +92,8 @@ def main() -> None:
 
                 source_url = extract_canonical_url(soup)
                 org_label = extract_org_label(soup)
-                report_year = infer_report_year_from_url(source_url) if source_url else None
-                if report_year is None:
-                    raise RuntimeError("Could not infer report_year from canonical URL.")
+                published_date = extract_date_published(soup)
+                report_year = report_year_from_published(published_date)
 
                 summary_by_fgid, summary_by_rk = parse_summary_table(soup)
                 report_rows, tools_rows = parse_report_blocks(soup, summary_by_fgid, summary_by_rk)
@@ -109,6 +110,7 @@ def main() -> None:
                     org_label=org_label,
                     report_year=report_year,
                     source_url=source_url,
+                    published_date=published_date,
                 )
                 write_tools_csv(tools_rows, tools_out)
 

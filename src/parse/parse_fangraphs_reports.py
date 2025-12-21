@@ -1,6 +1,8 @@
 import argparse
 import csv
 import re
+import json
+from datetime import datetime
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Optional
@@ -26,12 +28,40 @@ def sanitize_key(s: str) -> str:
     return s
 
 
-def parse_fgid_from_url(player_url: str) -> str:
+def parse_fgid_from_player_url(player_url: str) -> str:
+    """
+    Supports at least:
+      1) https://www.fangraphs.com/statss.aspx?playerid=31781
+      2) https://www.fangraphs.com/players/<name>/<fgid>/stats?...
+         e.g. https://www.fangraphs.com/players/samuel-basallo/sa3015716/stats?position=C/1B
+    Returns the FGID as a string (may include 'sa' prefix).
+    """
     parsed = urlparse(player_url)
-    pid = parse_qs(parsed.query).get("playerid", [None])[0]
-    if not pid:
-        raise ValueError(f"Could not parse FGID from url={player_url}")
-    return pid.strip()
+
+    # Pattern 1: query param
+    qs = parse_qs(parsed.query)
+    pid = qs.get("playerid", [None])[0]
+    if pid and str(pid).strip():
+        return str(pid).strip()
+
+    # Pattern 2: /players/<slug>/<fgid>/stats
+    parts = [p for p in parsed.path.split("/") if p]
+    # Expect: ["players", "<slug>", "<fgid>", "stats"]
+    if len(parts) >= 4 and parts[0] == "players" and parts[3].startswith("stats"):
+        fgid = parts[2].strip()
+        if fgid:
+            return fgid
+
+    # More general structure: find "players" then take the next-next segment
+    if "players" in parts:
+        i = parts.index("players")
+        if i + 2 < len(parts):
+            candidate = parts[i + 2].strip()
+            # guard: candidate should look like an id (often digits or 'sa' + digits)
+            if re.fullmatch(r"(?:sa)?\d+", candidate):
+                return candidate
+
+    raise ValueError(f"Could not parse FGID from url={player_url}")
 
 
 def infer_report_year_from_url(url: str) -> Optional[int]:
@@ -47,6 +77,90 @@ def extract_canonical_url(soup: BeautifulSoup) -> str:
     if h1 and h1.get("href"):
         return h1["href"].strip()
     return ""
+
+
+DATE_RE = re.compile(r"\bdatePublished\b\"?\s*:\s*\"([0-9]{4}-[0-9]{2}-[0-9]{2}[^\"}]*)\"", re.IGNORECASE)
+
+def extract_date_published(soup: BeautifulSoup) -> str:
+    """
+    Return publication datetime/date string, or "" if not found.
+    Prefer JSON-LD datePublished; fall back to meta tags.
+    """
+    scripts = soup.find_all("script", attrs={"type": "application/ld+json"})
+    for script in scripts:
+        raw = script.get_text(strip=True)  # more reliable than script.string
+        if not raw:
+            continue
+
+        # First attempt: parse JSON
+        try:
+            data = json.loads(raw)
+            stack = data if isinstance(data, list) else [data]
+
+            while stack:
+                obj = stack.pop()
+                if isinstance(obj, dict):
+                    dp = obj.get("datePublished") or obj.get("datepublished")
+                    if isinstance(dp, str) and dp.strip():
+                        return dp.strip()
+
+                    # Some JSON-LD uses @graph
+                    graph = obj.get("@graph")
+                    if isinstance(graph, list):
+                        stack.extend(graph)
+
+                    # Also scan nested dict/list values
+                    for v in obj.values():
+                        if isinstance(v, (dict, list)):
+                            stack.append(v)
+
+                elif isinstance(obj, list):
+                    stack.extend(obj)
+
+        except Exception:
+            # Second attempt: regex over raw text
+            m = DATE_RE.search(raw)
+            if m:
+                return m.group(1).strip()
+
+    # Fallback meta tags (best-effort)
+    meta = soup.find("meta", attrs={"property": "article:published_time"})
+    if meta and meta.get("content"):
+        return str(meta["content"]).strip()
+
+    meta = soup.find("meta", attrs={"name": "pubdate"})
+    if meta and meta.get("content"):
+        return str(meta["content"]).strip()
+
+    meta = soup.find("meta", attrs={"property": "og:updated_time"})
+    if meta and meta.get("content"):
+        # less ideal, but better than nothing
+        return str(meta["content"]).strip()
+
+    return ""
+
+
+def report_year_from_published(published: str) -> int:
+    """
+    Derive report year from publication date string.
+    Accepts ISO-8601 variants like '2024-02-05T12:34:56+00:00' or '2024-02-05'.
+    """
+    if not published:
+        raise RuntimeError("Missing published date; cannot infer report_year.")
+    # Normalize a few common formats
+    s = published.strip()
+    # datetime.fromisoformat handles many ISO variants but not all; strip trailing 'Z'
+    if s.endswith("Z"):
+        s = s[:-1]
+    try:
+        dt = datetime.fromisoformat(s)
+        return dt.year
+    except Exception:
+        # Try YYYY-MM-DD prefix
+        m = re.match(r"^\s*(20\d{2})-(\d{2})-(\d{2})", published)
+        if m:
+            return int(m.group(1))
+    raise RuntimeError(f"Could not parse published date format: {published!r}")
 
 
 def extract_org_label(soup: BeautifulSoup) -> str:
@@ -266,6 +380,81 @@ def parse_rank_from_header_text(header_text: str) -> Optional[int]:
     return int(m.group(1)) if m else None
 
 
+def extract_header_text_from_item(item: Tag) -> str:
+    """
+    Preferred: FanGraphs org report layout.
+    Fallbacks: any reasonable heading/link text inside the block.
+    """
+    h = item.select_one("div.table-header.grey h3.header-name")
+    if h:
+        return h.get_text(" ", strip=True)
+
+    # Fallback 1: Any h3 in the block (some templates omit the classes)
+    h = item.find("h3")
+    if h:
+        return h.get_text(" ", strip=True)
+
+    # Fallback 2: Some templates put the "header" into a table-title style div
+    t = item.select_one("div.table-title")
+    if t:
+        return t.get_text(" ", strip=True)
+
+    # Fallback 3: As a last resort, use the first player link text
+    a = item.select_one("a[href]")
+    if a:
+        return a.get_text(" ", strip=True)
+
+    return ""
+
+
+def iter_tool_grade_tables(item: Tag) -> list[Tag]:
+    """
+    Return candidate tables that likely contain tool grades.
+
+    Primary: your existing approach (all tables; caller can skip meta table).
+    Fallback: look for a title div containing 'Tool Grades' and then grab the
+              first table following it (sibling or descendant), which supports:
+
+        <div class="table-title">Tool Grades (Present/Future)</div>
+        <div class="table-player-0">
+          <table> ... </table>
+        </div>
+    """
+    tables = list(item.find_all("table"))
+    candidates: list[Tag] = tables[:]
+
+    # Fallback: "Tool Grades" title -> next table after it
+    for title in item.select("div.table-title"):
+        txt = title.get_text(" ", strip=True).lower()
+        if "tool grades" not in txt:
+            continue
+
+        # First, try: next tables among following siblings
+        nxt = title
+        while True:
+            nxt = nxt.find_next_sibling()
+            if nxt is None:
+                break
+            t = nxt.find("table")
+            if t is not None:
+                candidates.append(t)
+                break
+
+        # Also try: a table somewhere after the title in document order
+        t2 = title.find_next("table")
+        if t2 is not None:
+            candidates.append(t2)
+
+    out: list[Tag] = []
+    seen: set[int] = set()
+    for t in candidates:
+        if id(t) in seen:
+            continue
+        seen.add(id(t))
+        out.append(t)
+    return out
+
+
 def parse_report_blocks(
     soup: BeautifulSoup,
     summary_by_fgid: dict[str, SummaryRow],
@@ -287,24 +476,20 @@ def parse_report_blocks(
     used_rks: set[int] = set()
 
     for idx, item in enumerate(tool_items):
-        header_h3 = item.select_one("div.table-header.grey h3.header-name")
-        if header_h3 is None:
-            raise RuntimeError("Tool-item missing h3.header-name")
+        header_text = extract_header_text_from_item(item)
+        rk_from_header = parse_rank_from_header_text(header_text) if header_text else None
 
-        header_text = header_h3.get_text(" ", strip=True)
-        rk_from_header = parse_rank_from_header_text(header_text)
-
-        header_a = item.select_one("div.table-header.grey a[href*='playerid=']")
+        header_a = item.select_one("div.table-header.grey a[href]") or item.select_one("a[href]")
         fgid = ""
         player_url_from_block = ""
-        if header_a is not None:
+        if header_a is not None and header_a.get("href"):
             player_url_from_block = header_a["href"].strip()
             try:
                 fgid = parse_fgid_from_player_url(player_url_from_block)
             except Exception:
                 fgid = ""
-
-        # Choose summary row: FGID > rank > positional fallback
+        
+                # Choose summary row: FGID > rank > positional fallback
         srow: Optional[SummaryRow] = None
 
         if fgid and fgid in summary_by_fgid:
@@ -337,16 +522,22 @@ def parse_report_blocks(
             )
         )
 
+        # --- Tools parsing (primary + fallback) ---
         tools_dict: dict[str, Any] = {"rk": srow.rk, "fgid": srow.fgid}
 
-        tables = item.find_all("table")
-        if tables:
-            meta = parse_kv_table(tables[0])
+        candidate_tables = iter_tool_grade_tables(item)
+
+        if candidate_tables:
+            meta = parse_kv_table(candidate_tables[0])
             for k in ["bat_thr", "height", "weight", "age", "fv"]:
                 if k in meta:
                     tools_dict[f"meta_{k}"] = meta[k]
 
-        for t in tables[1:]:
+        # Parse tool grades from the remaining candidates.
+        # This supports both:
+        #  - org-report tables
+        #  - fallback HTML's <thead>/<tbody> tool table
+        for t in candidate_tables[1:]:
             parsed = parse_header_value_table(t)
             if not parsed:
                 continue
@@ -354,8 +545,7 @@ def parse_report_blocks(
                 tools_dict[f"tool_{k}"] = v
 
         tools_rows.append(normalize_tool_fields_in_row(tools_dict))
-
-
+    
     # Invariants (updated)
     if len(report_rows) != len(summary_by_rk):
         raise RuntimeError(
@@ -375,19 +565,12 @@ def parse_report_blocks(
     return report_rows_sorted, tools_rows
 
 
-def write_reports_csv(report_rows: list[ReportRow], out_path: Path, org_label: str, report_year: int, source_url: str) -> None:
+def write_reports_csv(report_rows: list[ReportRow], out_path: Path, org_label: str, report_year: int,
+                      source_url: str, published_date: str,) -> None:
     out_path.parent.mkdir(parents=True, exist_ok=True)
     fieldnames = [
-        "rk",
-        "fgid",
-        "player_name",
-        "highest_level",
-        "fv_raw",
-        "scouting_text_raw",
-        "player_url",
-        "org_label",
-        "report_year",
-        "source_url",
+    "rk","fgid","player_name","highest_level","fv_raw","scouting_text_raw",
+    "player_url","org_label","report_year","published_date","source_url",
     ]
     with out_path.open("w", newline="", encoding="utf-8") as f:
         w = csv.DictWriter(f, fieldnames=fieldnames)
@@ -405,6 +588,7 @@ def write_reports_csv(report_rows: list[ReportRow], out_path: Path, org_label: s
                     "org_label": org_label,
                     "report_year": report_year,
                     "source_url": source_url,
+                    "published_date": published_date,
                 }
             )
 
@@ -442,11 +626,9 @@ def main() -> None:
     soup = BeautifulSoup(html, "lxml")
 
     source_url = extract_canonical_url(soup)
-    report_year = infer_report_year_from_url(source_url) if source_url else None
-    if report_year is None:
-        raise RuntimeError("Could not infer report_year from canonical URL.")
-
     org_label = extract_org_label(soup)
+    published_date = extract_date_published(soup)
+    report_year = report_year_from_published(published_date)
     outdir = Path(args.outdir)
 
     summary_by_fgid, summary_by_rk = parse_summary_table(soup)
@@ -458,7 +640,8 @@ def main() -> None:
     reports_out = outdir / f"reports_{slug}.csv"
     tools_out = outdir / f"tools_{slug}.csv"
 
-    write_reports_csv(report_rows, reports_out, org_label=org_label, report_year=report_year, source_url=source_url)
+    write_reports_csv(report_rows, reports_out, org_label=org_label, report_year=report_year,
+                      source_url=source_url, published_date=published_date)
     write_tools_csv(tools_rows, tools_out)
 
     print(f"[OK] Wrote {len(report_rows)} report rows -> {reports_out}")

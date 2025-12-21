@@ -66,9 +66,9 @@ def fetch_one(
 def main() -> None:
     ap = argparse.ArgumentParser(description="Batch ingest FanGraphs org-year pages (save raw HTML snapshots).")
     ap.add_argument(
-        "--urls",
-        default="urls_test.txt",
-        help="Path to a text file of URLs (one per line). Default: urls_test.txt",
+    "--urls",
+    default="data/ingest/fangraphs/urls_test.txt",
+    help="Path to a text file of URLs (one per line)"
     )
     ap.add_argument("--outdir", default="data/raw/fangraphs/org_year_pages", help="Output directory for HTML")
     ap.add_argument("--timeout", type=int, default=30, help="Request timeout seconds")
