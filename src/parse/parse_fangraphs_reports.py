@@ -11,6 +11,11 @@ from urllib.parse import parse_qs, urlparse
 from bs4 import BeautifulSoup
 from bs4.element import Tag
 
+DATE_RE = re.compile(r"\bdatePublished\b\"?\s*:\s*\"([0-9]{4}-[0-9]{2}-[0-9]{2}[^\"}]*)\"", re.IGNORECASE)
+TOOL_CUR_FUT_RE = re.compile(r"^\s*(\d+(?:\.\d+)?)\s*/\s*(\d+(?:\.\d+)?)\s*$")
+BAT_THR_RE = re.compile(r"^\s*([LRS])\s*/\s*([LR])\s*$", re.IGNORECASE)
+SITS_TOPS_RE = re.compile(r"^\s*(\d{2,3})\s*[-–]\s*(\d{2,3})\s*/\s*(\d{2,3})\s*$")
+
 
 def sanitize_key(s: str) -> str:
     """
@@ -78,8 +83,6 @@ def extract_canonical_url(soup: BeautifulSoup) -> str:
         return h1["href"].strip()
     return ""
 
-
-DATE_RE = re.compile(r"\bdatePublished\b\"?\s*:\s*\"([0-9]{4}-[0-9]{2}-[0-9]{2}[^\"}]*)\"", re.IGNORECASE)
 
 def extract_date_published(soup: BeautifulSoup) -> str:
     """
@@ -170,7 +173,22 @@ def extract_org_label(soup: BeautifulSoup) -> str:
     return ""
 
 
-TOOL_CUR_FUT_RE = re.compile(r"^\s*(\d+(?:\.\d+)?)\s*/\s*(\d+(?:\.\d+)?)\s*$")
+def split_bat_thr(value: str) -> tuple[Optional[str], Optional[str]]:
+    """
+    Split 'R / R' into ('R','R'). Returns (None,None) if not matched.
+    """
+    if value is None:
+        return None, None
+    s = str(value).strip()
+    if not s:
+        return None, None
+    m = BAT_THR_RE.match(s)
+    if not m:
+        return None, None
+    bats, throws = m.group(1).upper(), m.group(2).upper()
+    return bats, throws
+
+
 def split_cur_fut(value: str) -> tuple[Optional[str], Optional[str]]:
     """
     Split tool strings like '20/50' into ('20', '50').
@@ -200,6 +218,25 @@ def split_cur_fut(value: str) -> tuple[Optional[str], Optional[str]]:
     return norm_num(cur_s), norm_num(fut_s)
 
 
+def split_sits_tops(value: str) -> tuple[Optional[str], Optional[str], Optional[str]]:
+    """
+    Split '91-95 / 97' into ('91','95','97').
+    Accepts hyphen or en dash between low/high.
+    """
+    if value is None:
+        return None, None, None
+    s = str(value).strip()
+    if not s:
+        return None, None, None
+
+    m = SITS_TOPS_RE.match(s)
+    if not m:
+        return None, None, None
+
+    low, high, tops = m.group(1), m.group(2), m.group(3)
+    return low, high, tops
+
+
 def normalize_tool_fields_in_row(row: dict[str, Any]) -> dict[str, Any]:
     """
     For every key 'tool_<name>' with value 'CUR/FUT', add:
@@ -207,6 +244,21 @@ def normalize_tool_fields_in_row(row: dict[str, Any]) -> dict[str, Any]:
     Keeps raw field unchanged.
     """
     out = dict(row)
+
+    if "meta_bat_thr" in out:
+        bats, throws = split_bat_thr(out.get("meta_bat_thr"))
+        if bats is not None and throws is not None:
+            out["meta_bats"] = bats
+            out["meta_throws"] = throws
+    
+    for key in ("tool_sits_tops",):
+        if key in out:
+            low, high, tops = split_sits_tops(out.get(key))
+            if low is not None and high is not None and tops is not None:
+                out["tool_sits_low"] = low
+                out["tool_sits_high"] = high
+                out["tool_tops"] = tops
+
     for k, v in row.items():
         if not isinstance(k, str):
             continue
