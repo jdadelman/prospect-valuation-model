@@ -134,6 +134,52 @@ Minimum required fields depend on your later feature engineering, but typical co
 
 ---
 
+## Identity Resolution (FGID → MLBAM ID)
+
+Canonical modeling tables in this project are keyed by **MLBAM ID** (`mlbam_id`), which is treated as the stable, cross-source player identifier.
+
+However, FanGraphs ingestion and parsing stages identify players primarily via:
+- FanGraphs player ID (`fgid`, when available), and
+- player name and URL text.
+
+To bridge this gap, the project includes an explicit **identity resolution pipeline** prior to any player-level joins or statistics integration.
+
+### Identity Resolution Stages
+
+1. **Normalized Identity Construction**
+   - A canonical identity list is built from intermediate FanGraphs outputs (`reports_*.csv`).
+   - Each identity is keyed by:
+     - `fgid` when present, or
+     - a stable synthetic key when `fgid` is missing.
+   - Output:  
+     `data/processed/player_identities.csv`
+
+2. **MLBAM Candidate Retrieval**
+   - For each normalized identity, candidate MLBAM player records are retrieved via MLB lookup APIs.
+   - Raw API responses are cached verbatim, with request/response metadata preserved.
+   - Output:
+     - Cached JSON responses under `data/raw/mlbam_lookup/`
+     - Fetch manifest recording HTTP status and provenance
+
+3. **ID Matching and Crosswalk Construction**
+   - Candidate MLBAM records are evaluated against normalized identities using name and biographical metadata (e.g., date of birth).
+   - Each identity is assigned one of:
+     - `unique` match
+     - `ambiguous` (multiple plausible MLBAM IDs)
+     - `unresolved`
+   - Output:
+     `data/processed/player_id_map.csv`
+
+### Canonical Identifier Usage
+
+- All canonical modeling tables (`player_season`, `player_season_stats`, etc.) use `mlbam_id` as the primary key.
+- `fgid` is retained as a secondary identifier for traceability and debugging.
+- Rows without a resolved `mlbam_id` are excluded from supervised modeling joins but may be retained for diagnostics or future resolution.
+
+Identity resolution outputs are treated as **data dependencies** for downstream build steps and are not recomputed implicitly.
+
+---
+
 ## Training Example Construction
 
 ### Primary supervised task
