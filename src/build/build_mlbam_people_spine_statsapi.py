@@ -77,11 +77,15 @@ def get_milb_teams_for_season(
     backoff_cap: float,
     cache_dir: Path,
     cache_enabled: bool,
-) -> list[dict[str, Any]]:
+) -> tuple[list[dict[str, Any]], dict[int, str]]:
+    """
+    Returns:
+      - teams list
+      - map team_id -> parent MLB org abbreviation (e.g. 'ATL')
+    """
     url = "https://statsapi.mlb.com/api/v1/teams"
     params = {
         "season": season,
-        # Many APIs accept comma-separated values; requests will encode as a single param.
         "sportIds": ",".join(str(x) for x in MILB_SPORT_IDS),
     }
     data = request_json(
@@ -95,8 +99,38 @@ def get_milb_teams_for_season(
     )
     maybe_cache_write(cache_dir / "teams" / f"teams_{season}.json", data, cache_enabled)
     teams = data.get("teams", [])
-    return teams if isinstance(teams, list) else []
+    teams = teams if isinstance(teams, list) else []
 
+    # Need MLB teams to map parentOrgId -> abbreviation
+    url_mlb = "https://statsapi.mlb.com/api/v1/teams"
+    data_mlb = request_json(
+        session=session,
+        url=url_mlb,
+        params={"season": season, "sportIds": "1"},
+        timeout_sec=timeout_sec,
+        retries=retries,
+        backoff_base=backoff_base,
+        backoff_cap=backoff_cap,
+    )
+    mlb_teams = data_mlb.get("teams", [])
+    mlb_teams = mlb_teams if isinstance(mlb_teams, list) else []
+    parent_id_to_abbrev: dict[int, str] = {}
+    for t in mlb_teams:
+        tid = t.get("id")
+        ab = t.get("abbreviation")
+        if isinstance(tid, int) and isinstance(ab, str) and ab.strip():
+            parent_id_to_abbrev[tid] = ab.strip()
+
+    team_id_to_parent_abbrev: dict[int, str] = {}
+    for t in teams:
+        tid = t.get("id")
+        parent = t.get("parentOrgId")
+        if isinstance(tid, int) and isinstance(parent, int):
+            ab = parent_id_to_abbrev.get(parent, "")
+            if ab:
+                team_id_to_parent_abbrev[tid] = ab
+
+    return teams, team_id_to_parent_abbrev
 
 @dataclass(frozen=True)
 class RosterTask:
@@ -239,8 +273,10 @@ def main() -> None:
     roster_tasks: list[RosterTask] = []
     team_counts_by_year: dict[int, int] = {}
 
+    team_parent_abbrev_by_season: dict[int, dict[int, str]] = {}
+
     for season in range(start_year, end_year + 1):
-        teams = get_milb_teams_for_season(
+        teams, team_id_to_parent_abbrev = get_milb_teams_for_season(
             session=session,
             season=season,
             timeout_sec=args.timeout,
@@ -250,6 +286,8 @@ def main() -> None:
             cache_dir=cache_dir,
             cache_enabled=bool(args.cache),
         )
+        team_parent_abbrev_by_season[season] = team_id_to_parent_abbrev
+
         team_ids = []
         for t in teams:
             tid = t.get("id")
@@ -260,11 +298,15 @@ def main() -> None:
 
         for tid in team_ids:
             roster_tasks.append(RosterTask(season=season, team_id=tid))
-
+    
     if not roster_tasks:
         raise SystemExit("No roster tasks created (no teams found).")
 
     seasons_seen: dict[int, set[int]] = {}
+    org_abbrevs_seen: dict[int, set[str]] = {}
+    parent_map = team_parent_abbrev_by_season.get(task.season, {})
+    team_abbrev = parent_map.get(task.team_id, "")
+
     roster_errors = 0
 
     roster_manifest_rows: list[dict[str, str]] = []
@@ -306,7 +348,9 @@ def main() -> None:
             else:
                 for pid in ids:
                     seasons_seen.setdefault(pid, set()).add(task.season)
-
+                    if team_abbrev:
+                        org_abbrevs_seen.setdefault(pid, set()).add(team_abbrev)
+            
             # lightweight progress
             if done % 200 == 0 or done == total:
                 print(f"[ROSTERS] {done}/{total} done; players so far={len(seasons_seen)}; errors={roster_errors}")
@@ -397,6 +441,7 @@ def main() -> None:
                             "pos": pos,
                             "height": str(p.get("height", "") or ""),
                             "weight": str(p.get("weight", "") or ""),
+                            "org_abbrevs_seen": "|".join(sorted(org_abbrevs_seen.get(pid, set()))),
                         }
             
             if done % 50 == 0 or done == total:
@@ -417,6 +462,7 @@ def main() -> None:
         "pos",
         "height",
         "weight",
+        "org_abbrevs_seen",
         "seasons_seen",
     ]
 
@@ -441,6 +487,7 @@ def main() -> None:
                     "pos": b.get("pos", ""),
                     "height": b.get("height", ""),
                     "weight": b.get("weight", ""),
+                    "org_abbrevs_seen": "|".join(sorted(org_abbrevs_seen.get(pid, set()))),
                     "seasons_seen": ",".join(str(x) for x in seasons),
                 }
             )
