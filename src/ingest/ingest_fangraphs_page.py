@@ -38,7 +38,7 @@ def looks_like_expected_article(html: str, url: str) -> bool:
     signals = [
         "fangraphs" in lowered,
         slug in lowered,
-        ("rk" in lowered and "fv" in lowered),  # crude but often present on these articles
+        ("rk" in lowered and "fv" in lowered),
     ]
     return any(signals)
 

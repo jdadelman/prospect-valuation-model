@@ -43,7 +43,6 @@ def infer_report_year_from_url(url: str) -> Optional[int]:
 
 
 def extract_org_label(soup: BeautifulSoup) -> str:
-    # From the summary table title, e.g. "Orioles Top Prospects"
     title = soup.select_one("div.table-container.table-green div.table-title")
     if title:
         return " ".join(title.get_text(" ", strip=True).split())
@@ -84,7 +83,7 @@ def parse_summary_table(html_path: Path) -> list[SummaryRow]:
     report_year = infer_report_year_from_url(source_url) if source_url else None
     if report_year is None:
         # As a fallback, try from filename
-        report_year = infer_report_year_from_url(html_path.name)  # might be None
+        report_year = infer_report_year_from_url(html_path.name)
     if report_year is None:
         raise RuntimeError("Could not infer report_year from canonical URL or filename.")
 
@@ -133,7 +132,7 @@ def parse_summary_table(html_path: Path) -> list[SummaryRow]:
             )
         )
 
-    # Strong invariants (fail fast)
+    # Strong invariants
     if not rows:
         raise RuntimeError("Parsed zero rows from summary table.")
     # Rank monotonicity: 1..N without duplicates
@@ -197,7 +196,6 @@ def main() -> None:
     if args.out:
         out_path = Path(args.out)
     else:
-        # minimal default: year only; you can change to include org later
         out_path = Path("data/intermediate/fangraphs") / f"summary_{rows[0].report_year}.csv"
 
     write_csv(rows, out_path)

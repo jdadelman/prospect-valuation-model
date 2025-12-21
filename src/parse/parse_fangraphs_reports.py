@@ -10,10 +10,6 @@ from bs4 import BeautifulSoup
 from bs4.element import Tag
 
 
-# -----------------------------
-# Helpers
-# -----------------------------
-
 def sanitize_key(s: str) -> str:
     """
     Convert tool header strings into stable column keys.
@@ -60,9 +56,60 @@ def extract_org_label(soup: BeautifulSoup) -> str:
     return ""
 
 
-# -----------------------------
-# Summary table (Phase 1) parse
-# -----------------------------
+TOOL_CUR_FUT_RE = re.compile(r"^\s*(\d+(?:\.\d+)?)\s*/\s*(\d+(?:\.\d+)?)\s*$")
+def split_cur_fut(value: str) -> tuple[Optional[str], Optional[str]]:
+    """
+    Split tool strings like '20/50' into ('20', '50').
+    Only matches pure numeric cur/fut. Otherwise returns (None, None).
+    Output strings are normalized numeric strings (int-like if possible).
+    """
+    if value is None:
+        return None, None
+    s = str(value).strip()
+    if not s:
+        return None, None
+    m = TOOL_CUR_FUT_RE.match(s)
+    if not m:
+        return None, None
+
+    cur_s, fut_s = m.group(1), m.group(2)
+
+    def norm_num(x: str) -> str:
+        # 20.0 -> 20 ; 42.5 stays 42.5
+        if "." in x:
+            fx = float(x)
+            if fx.is_integer():
+                return str(int(fx))
+            return str(fx)
+        return str(int(x))
+
+    return norm_num(cur_s), norm_num(fut_s)
+
+
+def normalize_tool_fields_in_row(row: dict[str, Any]) -> dict[str, Any]:
+    """
+    For every key 'tool_<name>' with value 'CUR/FUT', add:
+      'tool_<name>_cur', 'tool_<name>_fut'
+    Keeps raw field unchanged.
+    """
+    out = dict(row)
+    for k, v in row.items():
+        if not isinstance(k, str):
+            continue
+        if not k.startswith("tool_"):
+            continue
+        if k.endswith("_cur") or k.endswith("_fut"):
+            continue
+
+        cur, fut = split_cur_fut(str(v) if v is not None else "")
+        if cur is not None and fut is not None:
+            out[f"{k}_cur"] = cur
+            out[f"{k}_fut"] = fut
+        else:
+            # Keep empty explicit columns optional; writer will fill missing with ''
+            pass
+    return out
+
 
 @dataclass(frozen=True)
 class SummaryRow:
@@ -74,7 +121,7 @@ class SummaryRow:
     fv_raw: str
 
 
-def parse_summary_table(soup: BeautifulSoup) -> dict[str, SummaryRow]:
+def parse_summary_table(soup: BeautifulSoup) -> tuple[dict[str, SummaryRow], dict[int, SummaryRow]]:
     table = soup.select_one("div.table-container.table-green table.sortable")
     if table is None:
         raise RuntimeError("Could not find summary table: div.table-container.table-green table.sortable")
@@ -85,7 +132,8 @@ def parse_summary_table(soup: BeautifulSoup) -> dict[str, SummaryRow]:
     if missing:
         raise RuntimeError(f"Summary table missing headers {missing}. Found headers={headers}")
 
-    rows_by_fgid: dict[str, SummaryRow] = {}
+    by_fgid: dict[str, SummaryRow] = {}
+    by_rk: dict[int, SummaryRow] = {}
 
     for tr in table.select("tbody tr"):
         tds = tr.find_all("td")
@@ -93,23 +141,26 @@ def parse_summary_table(soup: BeautifulSoup) -> dict[str, SummaryRow]:
             continue
 
         rk_text = tds[0].get_text(strip=True)
-        name_a = tds[1].select_one("a[href]")
-        if not name_a:
-            raise RuntimeError("Summary row missing player link in Name column.")
-
-        player_name = name_a.get_text(" ", strip=True)
-        player_url = name_a["href"].strip()
-        fgid = parse_fgid_from_url(player_url)
-
-        highest_level = tds[3].get_text(" ", strip=True)
-        fv_raw = tds[6].get_text(" ", strip=True)
-
         try:
             rk = int(rk_text)
         except ValueError as e:
             raise RuntimeError(f"Could not parse rk={rk_text!r}") from e
 
-        rows_by_fgid[fgid] = SummaryRow(
+        # Name: may be <a> or plain text
+        name_a = tds[1].select_one("a[href]")
+        if name_a:
+            player_name = name_a.get_text(" ", strip=True)
+            player_url = name_a["href"].strip()
+            fgid = parse_fgid_from_player_url(player_url)
+        else:
+            player_name = tds[1].get_text(" ", strip=True)
+            player_url = ""
+            fgid = ""  # edge case: no FGID
+
+        highest_level = tds[3].get_text(" ", strip=True)
+        fv_raw = tds[6].get_text(" ", strip=True)
+
+        row = SummaryRow(
             rk=rk,
             player_name=player_name,
             fgid=fgid,
@@ -118,20 +169,25 @@ def parse_summary_table(soup: BeautifulSoup) -> dict[str, SummaryRow]:
             fv_raw=fv_raw,
         )
 
-    if not rows_by_fgid:
+        if rk in by_rk:
+            raise RuntimeError(f"Duplicate rank in summary table: rk={rk}")
+
+        by_rk[rk] = row
+        if fgid:
+            if fgid in by_fgid:
+                raise RuntimeError(f"Duplicate FGID in summary table: fgid={fgid}")
+            by_fgid[fgid] = row
+
+    if not by_rk:
         raise RuntimeError("Parsed zero rows from summary table.")
 
     # Rank sanity: 1..N
-    rks = sorted(r.rk for r in rows_by_fgid.values())
+    rks = sorted(by_rk.keys())
     if rks != list(range(1, len(rks) + 1)):
         raise RuntimeError(f"Ranks not 1..N. Parsed ranks={rks}")
 
-    return rows_by_fgid
+    return by_fgid, by_rk
 
-
-# -----------------------------
-# Report block parse (Phase 2)
-# -----------------------------
 
 @dataclass(frozen=True)
 class ReportRow:
@@ -204,12 +260,17 @@ def extract_scouting_text(tool_item: Tag) -> str:
     return "\n\n".join(texts).strip()
 
 
-def parse_report_blocks(soup: BeautifulSoup, summary_by_fgid: dict[str, SummaryRow]) -> tuple[list[ReportRow], list[dict[str, Any]]]:
-    """
-    Returns:
-      report_rows: list of per-player rows (joined to summary)
-      tools_rows: list of dict rows with wide tool fields (rk, fgid, ...)
-    """
+def parse_rank_from_header_text(header_text: str) -> Optional[int]:
+    # Typical: "1. Jackson Holliday, SS"
+    m = re.match(r"^\s*(\d+)\.", header_text.strip())
+    return int(m.group(1)) if m else None
+
+
+def parse_report_blocks(
+    soup: BeautifulSoup,
+    summary_by_fgid: dict[str, SummaryRow],
+    summary_by_rk: dict[int, SummaryRow],
+) -> tuple[list[ReportRow], list[dict[str, Any]]]:
     container = soup.select_one("div.fullpostentry")
     if container is None:
         raise RuntimeError("Could not find article body container: div.fullpostentry")
@@ -221,86 +282,98 @@ def parse_report_blocks(soup: BeautifulSoup, summary_by_fgid: dict[str, SummaryR
     report_rows: list[ReportRow] = []
     tools_rows: list[dict[str, Any]] = []
 
-    for item in tool_items:
-        header_a = item.select_one("div.table-header.grey a[href*='playerid=']")
+    # Used only if rank cannot be extracted and no FGID exists:
+    summary_rows_in_order = [summary_by_rk[i] for i in range(1, len(summary_by_rk) + 1)]
+    used_rks: set[int] = set()
+
+    for idx, item in enumerate(tool_items):
         header_h3 = item.select_one("div.table-header.grey h3.header-name")
+        if header_h3 is None:
+            raise RuntimeError("Tool-item missing h3.header-name")
 
-        if header_a is None or header_h3 is None:
-            raise RuntimeError("Tool-item missing expected header link or h3.header-name.")
+        header_text = header_h3.get_text(" ", strip=True)
+        rk_from_header = parse_rank_from_header_text(header_text)
 
-        player_url = header_a["href"].strip()
-        fgid = parse_fgid_from_url(player_url)
+        header_a = item.select_one("div.table-header.grey a[href*='playerid=']")
+        fgid = ""
+        player_url_from_block = ""
+        if header_a is not None:
+            player_url_from_block = header_a["href"].strip()
+            try:
+                fgid = parse_fgid_from_player_url(player_url_from_block)
+            except Exception:
+                fgid = ""
 
-        if fgid not in summary_by_fgid:
-            raise RuntimeError(f"FGID from report block not found in summary table: fgid={fgid}")
+        # Choose summary row: FGID > rank > positional fallback
+        srow: Optional[SummaryRow] = None
 
-        srow = summary_by_fgid[fgid]
+        if fgid and fgid in summary_by_fgid:
+            srow = summary_by_fgid[fgid]
+        elif rk_from_header is not None and rk_from_header in summary_by_rk:
+            srow = summary_by_rk[rk_from_header]
+        else:
+            # Positional fallback (least reliable)
+            if idx < len(summary_rows_in_order):
+                srow = summary_rows_in_order[idx]
+
+        if srow is None:
+            raise RuntimeError("Could not match report block to any summary row.")
+
+        if srow.rk in used_rks:
+            raise RuntimeError(f"Matched multiple report blocks to same rank: rk={srow.rk}")
+        used_rks.add(srow.rk)
 
         scouting_text_raw = extract_scouting_text(item)
 
         report_rows.append(
             ReportRow(
                 rk=srow.rk,
-                fgid=fgid,
+                fgid=srow.fgid,  # may be empty
                 player_name=srow.player_name,
                 highest_level=srow.highest_level,
                 fv_raw=srow.fv_raw,
                 scouting_text_raw=scouting_text_raw,
-                player_url=srow.player_url,
+                player_url=srow.player_url,  # may be empty
             )
         )
 
-        # Tools: parse all tables inside the tool-item
-        tools_dict: dict[str, Any] = {"rk": srow.rk, "fgid": fgid}
-        tables = item.find_all("table")
+        tools_dict: dict[str, Any] = {"rk": srow.rk, "fgid": srow.fgid}
 
-        # First table is commonly the meta key/value table
+        tables = item.find_all("table")
         if tables:
             meta = parse_kv_table(tables[0])
-            # Keep these optional fields (may be useful for debugging even if MLBAM overrides later)
             for k in ["bat_thr", "height", "weight", "age", "fv"]:
                 if k in meta:
                     tools_dict[f"meta_{k}"] = meta[k]
 
-        # Remaining tables: try header/value parsing
         for t in tables[1:]:
             parsed = parse_header_value_table(t)
             if not parsed:
                 continue
-
-            # Heuristic: hitter tools table contains hit/raw_power/game_power/run/fielding/throw
-            # pitcher tools table contains command and pitches.
-            # We keep everything; wide union happens at write time.
             for k, v in parsed.items():
                 tools_dict[f"tool_{k}"] = v
 
-        tools_rows.append(tools_dict)
+        tools_rows.append(normalize_tool_fields_in_row(tools_dict))
 
-    # Invariants
-    if len(report_rows) != len(summary_by_fgid):
-        # Allowing this would hide errors; fail fast.
+
+    # Invariants (updated)
+    if len(report_rows) != len(summary_by_rk):
         raise RuntimeError(
-            f"Join incomplete: summary rows={len(summary_by_fgid)} but report blocks parsed={len(report_rows)}"
+            f"Join incomplete: summary rows={len(summary_by_rk)} but report blocks parsed={len(report_rows)}"
         )
 
-    # Text sanity (weak but useful)
-    nontrivial = sum(1 for r in report_rows if len(r.scouting_text_raw) >= 50)
-    if nontrivial < int(0.8 * len(report_rows)):
-        raise RuntimeError(
-            f"Scouting text looks too empty: only {nontrivial}/{len(report_rows)} have >=50 chars"
-        )
-
-    # Rank sanity
     report_rows_sorted = sorted(report_rows, key=lambda r: r.rk)
     if [r.rk for r in report_rows_sorted] != list(range(1, len(report_rows_sorted) + 1)):
         raise RuntimeError("Report ranks are not 1..N after parsing.")
 
+    nontrivial = sum(1 for r in report_rows_sorted if len(r.scouting_text_raw) >= 50)
+    if nontrivial < int(0.8 * len(report_rows_sorted)):
+        raise RuntimeError(
+            f"Scouting text looks too empty: only {nontrivial}/{len(report_rows_sorted)} have >=50 chars"
+        )
+
     return report_rows_sorted, tools_rows
 
-
-# -----------------------------
-# Writers
-# -----------------------------
 
 def write_reports_csv(report_rows: list[ReportRow], out_path: Path, org_label: str, report_year: int, source_url: str) -> None:
     out_path.parent.mkdir(parents=True, exist_ok=True)
@@ -354,10 +427,6 @@ def write_tools_csv(tools_rows: list[dict[str, Any]], out_path: Path) -> None:
             w.writerow({k: r.get(k, "") for k in fieldnames})
 
 
-# -----------------------------
-# Main
-# -----------------------------
-
 def main() -> None:
     ap = argparse.ArgumentParser(description="Parse FanGraphs org-year reports (tools + text) to intermediate CSVs.")
     ap.add_argument("--html", required=True, help="Path to saved org-year HTML file")
@@ -380,10 +449,9 @@ def main() -> None:
     org_label = extract_org_label(soup)
     outdir = Path(args.outdir)
 
-    summary_by_fgid = parse_summary_table(soup)
-    report_rows, tools_rows = parse_report_blocks(soup, summary_by_fgid)
+    summary_by_fgid, summary_by_rk = parse_summary_table(soup)
+    report_rows, tools_rows = parse_report_blocks(soup, summary_by_fgid, summary_by_rk)
 
-    # filename slug: prefer URL slug
     slug = re.sub(r"[?#].*$", "", (source_url or html_path.name)).rstrip("/").split("/")[-1]
     slug = slugify(slug)
 

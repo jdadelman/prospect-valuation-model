@@ -2,6 +2,7 @@ import argparse
 import csv
 import sys
 import traceback
+from bs4 import BeautifulSoup
 from pathlib import Path
 
 # Ensure repo root is on sys.path so we can import src.parse.*
@@ -9,10 +10,7 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from bs4 import BeautifulSoup  # type: ignore
-
-# Import your single-page parser module (must exist)
-from src.parse.parse_fangraphs_reports import (  # type: ignore
+from src.parse.parse_fangraphs_reports import (
     extract_canonical_url,
     extract_org_label,
     infer_report_year_from_url,
@@ -96,8 +94,11 @@ def main() -> None:
                 if report_year is None:
                     raise RuntimeError("Could not infer report_year from canonical URL.")
 
-                summary_by_fgid = parse_summary_table(soup)
-                report_rows, tools_rows = parse_report_blocks(soup, summary_by_fgid)
+                summary_by_fgid, summary_by_rk = parse_summary_table(soup)
+                report_rows, tools_rows = parse_report_blocks(soup, summary_by_fgid, summary_by_rk)
+
+                row["summary_rows"] = str(len(summary_by_rk))
+                row["report_blocks"] = str(len(report_rows))
 
                 reports_out = outdir / f"reports_{slug}.csv"
                 tools_out = outdir / f"tools_{slug}.csv"
@@ -122,9 +123,7 @@ def main() -> None:
 
             except Exception as e:
                 row["error"] = f"{type(e).__name__}: {e}"
-                # If you want a full traceback saved per failure, you can add a file write here:
-                # (kept minimal for now)
-                # print(traceback.format_exc(), file=sys.stderr)
+                print(traceback.format_exc(), file=sys.stderr)
 
             w.writerow(row)
             print(f"[{i}/{len(html_files)}] {html_path.name} -> ok={row['ok']} {row['error']}".strip())

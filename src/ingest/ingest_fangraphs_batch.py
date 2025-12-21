@@ -5,13 +5,11 @@ import json
 import time
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Optional
 
 import requests
 
 
 def slugify_url(url: str) -> str:
-    # use last path segment; fallback to hash
     u = url.split("#", 1)[0].split("?", 1)[0].rstrip("/")
     last = u.rsplit("/", 1)[-1] if "/" in u else u
     if not last:
@@ -20,6 +18,8 @@ def slugify_url(url: str) -> str:
 
 
 def load_urls(path: Path) -> list[str]:
+    if not path.exists():
+        raise FileNotFoundError(f"URL list file not found: {path}")
     lines = path.read_text(encoding="utf-8").splitlines()
     urls: list[str] = []
     for line in lines:
@@ -65,7 +65,11 @@ def fetch_one(
 
 def main() -> None:
     ap = argparse.ArgumentParser(description="Batch ingest FanGraphs org-year pages (save raw HTML snapshots).")
-    ap.add_argument("--urls", required=True, help="Path to a text file of URLs (one per line)")
+    ap.add_argument(
+        "--urls",
+        default="urls_test.txt",
+        help="Path to a text file of URLs (one per line). Default: urls_test.txt",
+    )
     ap.add_argument("--outdir", default="data/raw/fangraphs/org_year_pages", help="Output directory for HTML")
     ap.add_argument("--timeout", type=int, default=30, help="Request timeout seconds")
     ap.add_argument("--sleep", type=float, default=2.0, help="Seconds to sleep between requests")
@@ -75,7 +79,7 @@ def main() -> None:
     url_path = Path(args.urls)
     urls = load_urls(url_path)
     if not urls:
-        raise SystemExit("No URLs found in urls file.")
+        raise SystemExit(f"No URLs found in {url_path}")
 
     outdir = Path(args.outdir)
     manifest_path = Path(args.manifest)
