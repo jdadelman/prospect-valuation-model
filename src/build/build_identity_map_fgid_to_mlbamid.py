@@ -4,7 +4,7 @@ import unicodedata
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Optional, Any
+from typing import Any, Iterable, Optional
 
 
 def utc_now_iso() -> str:
@@ -51,7 +51,6 @@ def parse_ymd_from_iso(s: str) -> tuple[str, str, str]:
     s = (s or "").strip()
     if not s:
         return "", "", ""
-    # Accept YYYY-MM-DD prefix even if time exists
     s = s.split("T", 1)[0]
     parts = s.split("-")
     if len(parts) >= 3:
@@ -59,12 +58,14 @@ def parse_ymd_from_iso(s: str) -> tuple[str, str, str]:
     return "", "", ""
 
 
-def get_first_existing(row: dict[str, str], keys: list[str]) -> str:
-    for k in keys:
-        v = (row.get(k) or "").strip()
-        if v:
-            return v
-    return ""
+def parse_float(s: str) -> Optional[float]:
+    s = (s or "").strip()
+    if not s:
+        return None
+    try:
+        return float(s)
+    except ValueError:
+        return None
 
 
 @dataclass(frozen=True)
@@ -76,6 +77,9 @@ class IdentityRow:
     yob: str
     mob: str
     dob: str
+    org_abbrevs: str
+    published_date_latest: str
+    age_mean: str
 
 
 @dataclass(frozen=True)
@@ -86,102 +90,108 @@ class SpineRow:
     yob: str
     mob: str
     dob: str
+    org_abbrevs_seen: str
 
 
-def read_identities(path: Path) -> list[IdentityRow]:
-    with path.open("r", newline="", encoding="utf-8") as f:
-        r = csv.DictReader(f)
-        required = {"identity_key", "fgid", "player_name", "player_url"}
-        missing = required - set(r.fieldnames or [])
-        if missing:
-            raise RuntimeError(f"{path}: missing required columns: {sorted(missing)}")
-
-        out: list[IdentityRow] = []
-        for row in r:
-            # Optional DOB fields
-            birth_date = (row.get("birth_date") or row.get("dob_ymd") or "").strip()
-            yob, mob, dob = ("", "", "")
-            if birth_date:
-                yob, mob, dob = parse_ymd_from_iso(birth_date)
-            else:
-                yob = (row.get("yob") or "").strip()
-                mob = (row.get("mob") or "").strip()
-                dob = (row.get("dob") or "").strip()
-
-            out.append(
-                IdentityRow(
-                    identity_key=(row.get("identity_key") or "").strip(),
-                    fgid=(row.get("fgid") or "").strip(),
-                    player_name=(row.get("player_name") or "").strip(),
-                    player_url=(row.get("player_url") or "").strip(),
-                    yob=yob,
-                    mob=mob,
-                    dob=dob,
-                )
-            )
-        return out
-
-
-def read_spine(path: Path) -> list[SpineRow]:
+def read_csv_dicts(path: Path) -> Iterable[dict[str, str]]:
     with path.open("r", newline="", encoding="utf-8") as f:
         r = csv.DictReader(f)
         if not r.fieldnames:
             raise RuntimeError(f"{path}: empty CSV / missing header")
-
-        # Accept a few plausible column variants
-        col_mlbam = None
-        for cand in ["mlbam_id", "key_mlbam"]:
-            if cand in r.fieldnames:
-                col_mlbam = cand
-                break
-        if col_mlbam is None:
-            raise RuntimeError(f"{path}: missing MLBAM column (expected mlbam_id or key_mlbam)")
-
-        # name columns
-        # (Stats API spine uses name_first/name_last per our script; be permissive)
-        col_first = None
-        for cand in ["name_first", "first_name", "NameFirst", "First", "first"]:
-            if cand in r.fieldnames:
-                col_first = cand
-                break
-
-        col_last = None
-        for cand in ["name_last", "last_name", "NameLast", "Last", "last"]:
-            if cand in r.fieldnames:
-                col_last = cand
-                break
-
-        if col_first is None or col_last is None:
-            raise RuntimeError(f"{path}: missing name_first/name_last columns (found={r.fieldnames})")
-
-        out: list[SpineRow] = []
         for row in r:
-            mlbam = (row.get(col_mlbam) or "").strip()
-            if not mlbam:
-                continue
+            yield {k: (row.get(k) or "").strip() for k in (r.fieldnames or [])}
 
-            birth_date = get_first_existing(row, ["birth_date", "DOB", "dob", "dob_ymd"])
-            yob, mob, dob = ("", "", "")
-            if birth_date:
-                yob, mob, dob = parse_ymd_from_iso(birth_date)
-            else:
-                yob = (row.get("yob") or "").strip()
-                mob = (row.get("mob") or "").strip()
-                dob = (row.get("dob") or "").strip()
 
-            out.append(
-                SpineRow(
-                    mlbam_id=mlbam,
-                    name_first=(row.get(col_first) or "").strip(),
-                    name_last=(row.get(col_last) or "").strip(),
-                    yob=yob,
-                    mob=mob,
-                    dob=dob,
-                )
+def read_identities(path: Path) -> list[IdentityRow]:
+    rows = list(read_csv_dicts(path))
+    if not rows:
+        raise RuntimeError(f"{path}: parsed zero rows")
+
+    required = {"identity_key", "fgid", "player_name", "player_url"}
+    missing = required - set(rows[0].keys())
+    if missing:
+        raise RuntimeError(f"{path}: missing required columns: {sorted(missing)}")
+
+    out: list[IdentityRow] = []
+    for row in rows:
+        birth_date = (row.get("birth_date") or row.get("dob_ymd") or "").strip()
+        yob, mob, dob = ("", "", "")
+        if birth_date:
+            yob, mob, dob = parse_ymd_from_iso(birth_date)
+        else:
+            yob = (row.get("yob") or "").strip()
+            mob = (row.get("mob") or "").strip()
+            dob = (row.get("dob") or "").strip()
+
+        out.append(
+            IdentityRow(
+                identity_key=(row.get("identity_key") or "").strip(),
+                fgid=(row.get("fgid") or "").strip(),
+                player_name=(row.get("player_name") or "").strip(),
+                player_url=(row.get("player_url") or "").strip(),
+                yob=yob,
+                mob=mob,
+                dob=dob,
+                org_abbrevs=(row.get("org_abbrevs") or "").strip(),
+                published_date_latest=(row.get("published_date_latest") or "").strip(),
+                age_mean=(row.get("age_mean") or "").strip(),
             )
-        if not out:
-            raise RuntimeError(f"{path}: parsed zero rows")
-        return out
+        )
+    return out
+
+
+def read_spine(path: Path) -> list[SpineRow]:
+    rows = list(read_csv_dicts(path))
+    if not rows:
+        raise RuntimeError(f"{path}: parsed zero rows")
+
+    # Detect likely column names (be permissive)
+    keys = set(rows[0].keys())
+
+    def pick(*cands: str) -> Optional[str]:
+        for c in cands:
+            if c in keys:
+                return c
+        return None
+
+    col_mlbam = pick("mlbam_id")
+    col_first = pick("name_first", "first_name", "First", "first")
+    col_last = pick("name_last", "last_name", "Last", "last")
+
+    if not col_mlbam or not col_first or not col_last:
+        raise RuntimeError(f"{path}: missing required columns for mlbam/name_first/name_last. Found={sorted(keys)}")
+
+    col_birth = pick("birth_date", "DOB", "dob_ymd")
+    has_orgs = "org_abbrevs_seen" in keys
+
+    out: list[SpineRow] = []
+    for row in rows:
+        mlbam = (row.get(col_mlbam) or "").strip()
+        if not mlbam:
+            continue
+
+        yob, mob, dob = ("", "", "")
+        if col_birth and (row.get(col_birth) or "").strip():
+            yob, mob, dob = parse_ymd_from_iso((row.get(col_birth) or "").strip())
+        else:
+            yob = (row.get("yob") or "").strip()
+            mob = (row.get("mob") or "").strip()
+            dob = (row.get("dob") or "").strip()
+
+        out.append(
+            SpineRow(
+                mlbam_id=mlbam,
+                name_first=(row.get(col_first) or "").strip(),
+                name_last=(row.get(col_last) or "").strip(),
+                yob=yob,
+                mob=mob,
+                dob=dob,
+                org_abbrevs_seen=(row.get("org_abbrevs_seen") or "").strip() if has_orgs else "",
+            )
+        )
+    if not out:
+        raise RuntimeError(f"{path}: parsed zero usable rows")
+    return out
 
 
 def add_to_index(index: dict[tuple[str, ...], list[str]], key: tuple[str, ...], mlbam_id: str) -> None:
@@ -200,26 +210,14 @@ def unique_or_none(ids: list[str]) -> Optional[str]:
 
 
 def main() -> None:
-    ap = argparse.ArgumentParser(description="Build FGID→MLBAM identity map from MLBAM people spine.")
-    ap.add_argument(
-        "--identities",
-        default="data/processed/player_identities.csv",
-        help="Input identities CSV (Stage A output).",
-    )
-    ap.add_argument(
-        "--spine",
-        default="data/processed/mlbam_people_spine_2021_2025.csv",
-        help="Input MLBAM people spine CSV.",
-    )
-    ap.add_argument(
-        "--out",
-        default="data/intermediate/identity_map_fgid_to_mlbam.csv",
-        help="Output mapping CSV.",
-    )
+    ap = argparse.ArgumentParser(description="Build FG identity → MLBAM ID crosswalk using MLBAM people spine.")
+    ap.add_argument("--identities", default="data/processed/player_identities.csv", help="Input identities CSV.")
+    ap.add_argument("--spine", default="data/processed/mlbam_people_spine_2021_2025.csv", help="Input MLBAM spine CSV.")
+    ap.add_argument("--out", default="data/intermediate/identity_map_fgid_to_mlbam.csv", help="Output mapping CSV.")
     ap.add_argument(
         "--manifest",
         default="data/intermediate/identity_map_fgid_to_mlbam_manifest.csv",
-        help="Optional manifest-style summary CSV.",
+        help="Output manifest/summary CSV.",
     )
     args = ap.parse_args()
 
@@ -231,10 +229,12 @@ def main() -> None:
     identities = read_identities(identities_path)
     spine = read_spine(spine_path)
 
-    # Build indices from spine
     idx_first_last_dob: dict[tuple[str, str, str, str, str], list[str]] = {}
     idx_last_dob: dict[tuple[str, str, str, str], list[str]] = {}
     idx_full_name: dict[tuple[str], list[str]] = {}
+
+    spine_yob_by_id: dict[str, str] = {}
+    spine_orgs_by_id: dict[str, set[str]] = {}
 
     for s in spine:
         fn = norm_text(s.name_first)
@@ -242,21 +242,23 @@ def main() -> None:
         full = norm_text(f"{s.name_first} {s.name_last}")
 
         y, m, d = (s.yob.strip(), s.mob.strip(), s.dob.strip())
-        # Keep DOB keys only if complete; partial DOB cannot support deterministic rules.
         if y and m and d:
             add_to_index(idx_first_last_dob, (fn, ln, y, m, d), s.mlbam_id)
             add_to_index(idx_last_dob, (ln, y, m, d), s.mlbam_id)
 
-        # Name-only index always
         if full:
             add_to_index(idx_full_name, (full,), s.mlbam_id)
+
+        spine_yob_by_id[s.mlbam_id] = (s.yob or "").strip()
+        if s.org_abbrevs_seen:
+            spine_orgs_by_id[s.mlbam_id] = set(x for x in s.org_abbrevs_seen.split("|") if x.strip())
 
     out_path.parent.mkdir(parents=True, exist_ok=True)
 
     matched = 0
     ambiguous = 0
     unmatched = 0
-    by_method: dict[str, int] = {}
+    by_status: dict[str, int] = {}
 
     out_fields = [
         "identity_key",
@@ -270,6 +272,9 @@ def main() -> None:
         "identity_yob",
         "identity_mob",
         "identity_dob",
+        "identity_org_abbrevs",
+        "identity_published_date_latest",
+        "identity_age_mean",
     ]
 
     with out_path.open("w", newline="", encoding="utf-8") as f:
@@ -288,7 +293,7 @@ def main() -> None:
             match_status: str = ""
             candidates: list[str] = []
 
-            # Rule 1: exact normalized first+last + full DOB (only if DOB present on identity)
+            # Rule 1: exact normalized first+last + full DOB
             if has_dob:
                 candidates = idx_first_last_dob.get((first_norm, last_norm, y, m, d), [])
                 u = unique_or_none(candidates)
@@ -306,30 +311,65 @@ def main() -> None:
                     match_method = "lastname_dob"
                     match_status = "matched_lastname_dob"
 
-            # Rule 3: exact full name only if unique
+            # Rule 3: full-name rule (+ tie-breaks if ambiguous)
             if not mlbam_id:
                 candidates = idx_full_name.get((full_norm,), [])
+                cand_unique = sorted(set(candidates))
                 u = unique_or_none(candidates)
+
                 if u:
                     mlbam_id = u
                     match_method = "name_only_unique"
                     match_status = "matched_name_only_unique"
+                else:
+                    chosen: Optional[str] = None
+
+                    ident_orgs = [x for x in ident.org_abbrevs.split("|") if x.strip()]
+                    if ident_orgs and spine_orgs_by_id and cand_unique:
+                        hits = []
+                        for cid in cand_unique:
+                            orgs = spine_orgs_by_id.get(cid, set())
+                            if any(o in orgs for o in ident_orgs):
+                                hits.append(cid)
+                        if len(hits) == 1:
+                            chosen = hits[0]
+                            match_method = "name_plus_org_unique"
+                            match_status = "matched_name_with_tiebreak"
+
+                    if chosen is None and ident.published_date_latest and ident.age_mean and cand_unique:
+                        age = parse_float(ident.age_mean)
+                        if age is not None:
+                            pub_y, _, _ = parse_ymd_from_iso(ident.published_date_latest)
+                            if pub_y.isdigit():
+                                est_yob = int(pub_y) - int(age)  # coarse, expected +/- 1
+                                hits = []
+                                for cid in cand_unique:
+                                    yob_c = spine_yob_by_id.get(cid, "")
+                                    if yob_c.isdigit() and abs(int(yob_c) - est_yob) <= 1:
+                                        hits.append(cid)
+                                if len(hits) == 1:
+                                    chosen = hits[0]
+                                    match_method = "name_plus_est_yob_unique"
+                                    match_status = "matched_name_with_tiebreak"
+
+                    if chosen:
+                        mlbam_id = chosen
 
             if mlbam_id:
                 matched += 1
-                by_method[match_status] = by_method.get(match_status, 0) + 1
+                by_status[match_status] = by_status.get(match_status, 0) + 1
             else:
-                # Determine ambiguous vs unmatched based on name-only candidate multiplicity
+                # classify ambiguity/unmatched primarily from name candidates
                 if candidates and len(set(candidates)) > 1:
                     ambiguous += 1
                     match_status = "ambiguous_multiple_candidates"
                     match_method = "name_only"
-                    by_method[match_status] = by_method.get(match_status, 0) + 1
+                    by_status[match_status] = by_status.get(match_status, 0) + 1
                 else:
                     unmatched += 1
                     match_status = "unmatched_no_candidate"
                     match_method = "none"
-                    by_method[match_status] = by_method.get(match_status, 0) + 1
+                    by_status[match_status] = by_status.get(match_status, 0) + 1
 
             w.writerow(
                 {
@@ -344,6 +384,9 @@ def main() -> None:
                     "identity_yob": y,
                     "identity_mob": m,
                     "identity_dob": d,
+                    "identity_org_abbrevs": ident.org_abbrevs,
+                    "identity_published_date_latest": ident.published_date_latest,
+                    "identity_age_mean": ident.age_mean,
                 }
             )
 
@@ -353,7 +396,7 @@ def main() -> None:
         w.writeheader()
         w.writerow(
             {
-                "generated_at_utc": str(utc_now_iso()),
+                "generated_at_utc": utc_now_iso(),
                 "identities": str(len(identities)),
                 "matched": str(matched),
                 "ambiguous": str(ambiguous),
@@ -361,17 +404,17 @@ def main() -> None:
             }
         )
 
-        w2 = csv.DictWriter(mf, fieldnames=["status", "count"])
         mf.write("\n")
+        w2 = csv.DictWriter(mf, fieldnames=["status", "count"])
         w2.writeheader()
-        for k in sorted(by_method.keys()):
-            w2.writerow({"status": k, "count": str(by_method[k])})
+        for k in sorted(by_status.keys()):
+            w2.writerow({"status": k, "count": str(by_status[k])})
 
     print(f"[OK] Wrote identity map: {out_path}")
     print(f"[OK] Wrote manifest:    {manifest_path}")
     print(f"[INFO] identities={len(identities)} matched={matched} ambiguous={ambiguous} unmatched={unmatched}")
-    for k in sorted(by_method.keys()):
-        print(f"[INFO]   {k}: {by_method[k]}")
+    for k in sorted(by_status.keys()):
+        print(f"[INFO]   {k}: {by_status[k]}")
 
 
 if __name__ == "__main__":

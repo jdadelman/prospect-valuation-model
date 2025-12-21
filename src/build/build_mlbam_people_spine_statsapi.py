@@ -14,6 +14,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 
 # MiLB sportIds: AAA=11, AA=12, High-A=13, Low-A=14, Rookie=16
 MILB_SPORT_IDS = [11, 12, 13, 14, 16]
+MLB_SPORT_ID = 1
 
 
 def utc_now_iso() -> str:
@@ -68,7 +69,37 @@ def maybe_cache_write(path: Path, obj: Any, enabled: bool) -> None:
     path.write_text(json.dumps(obj, indent=2), encoding="utf-8")
 
 
-def get_milb_teams_for_season(
+def get_mlb_parentorg_abbrev_map(
+    session: requests.Session,
+    season: int,
+    timeout_sec: int,
+    retries: int,
+    backoff_base: float,
+    backoff_cap: float,
+) -> dict[int, str]:
+    url = "https://statsapi.mlb.com/api/v1/teams"
+    data = request_json(
+        session=session,
+        url=url,
+        params={"season": season, "sportIds": str(MLB_SPORT_ID)},
+        timeout_sec=timeout_sec,
+        retries=retries,
+        backoff_base=backoff_base,
+        backoff_cap=backoff_cap,
+    )
+    teams = data.get("teams", [])
+    teams = teams if isinstance(teams, list) else []
+
+    out: dict[int, str] = {}
+    for t in teams:
+        tid = t.get("id")
+        ab = t.get("abbreviation")
+        if isinstance(tid, int) and isinstance(ab, str) and ab.strip():
+            out[tid] = ab.strip()
+    return out
+
+
+def get_milb_teams_and_parent_abbrev(
     session: requests.Session,
     season: int,
     timeout_sec: int,
@@ -80,14 +111,11 @@ def get_milb_teams_for_season(
 ) -> tuple[list[dict[str, Any]], dict[int, str]]:
     """
     Returns:
-      - teams list
-      - map team_id -> parent MLB org abbreviation (e.g. 'ATL')
+      - list of MiLB teams
+      - mapping team_id -> parent MLB org abbreviation (e.g., 'ATL')
     """
     url = "https://statsapi.mlb.com/api/v1/teams"
-    params = {
-        "season": season,
-        "sportIds": ",".join(str(x) for x in MILB_SPORT_IDS),
-    }
+    params = {"season": season, "sportIds": ",".join(str(x) for x in MILB_SPORT_IDS)}
     data = request_json(
         session=session,
         url=url,
@@ -97,29 +125,18 @@ def get_milb_teams_for_season(
         backoff_base=backoff_base,
         backoff_cap=backoff_cap,
     )
-    maybe_cache_write(cache_dir / "teams" / f"teams_{season}.json", data, cache_enabled)
+    maybe_cache_write(cache_dir / "teams" / f"teams_milb_{season}.json", data, cache_enabled)
     teams = data.get("teams", [])
     teams = teams if isinstance(teams, list) else []
 
-    # Need MLB teams to map parentOrgId -> abbreviation
-    url_mlb = "https://statsapi.mlb.com/api/v1/teams"
-    data_mlb = request_json(
+    parent_id_to_abbrev = get_mlb_parentorg_abbrev_map(
         session=session,
-        url=url_mlb,
-        params={"season": season, "sportIds": "1"},
+        season=season,
         timeout_sec=timeout_sec,
         retries=retries,
         backoff_base=backoff_base,
         backoff_cap=backoff_cap,
     )
-    mlb_teams = data_mlb.get("teams", [])
-    mlb_teams = mlb_teams if isinstance(mlb_teams, list) else []
-    parent_id_to_abbrev: dict[int, str] = {}
-    for t in mlb_teams:
-        tid = t.get("id")
-        ab = t.get("abbreviation")
-        if isinstance(tid, int) and isinstance(ab, str) and ab.strip():
-            parent_id_to_abbrev[tid] = ab.strip()
 
     team_id_to_parent_abbrev: dict[int, str] = {}
     for t in teams:
@@ -129,8 +146,8 @@ def get_milb_teams_for_season(
             ab = parent_id_to_abbrev.get(parent, "")
             if ab:
                 team_id_to_parent_abbrev[tid] = ab
-
     return teams, team_id_to_parent_abbrev
+
 
 @dataclass(frozen=True)
 class RosterTask:
@@ -146,9 +163,6 @@ def fetch_roster_ids(
     backoff_base: float,
     backoff_cap: float,
 ) -> tuple[RosterTask, list[int], Optional[str]]:
-    """
-    Returns (task, player_ids, error_str_or_none)
-    """
     url = f"https://statsapi.mlb.com/api/v1/teams/{task.team_id}/roster"
     params = {"season": task.season}
 
@@ -183,9 +197,6 @@ def fetch_people_chunk(
     backoff_base: float,
     backoff_cap: float,
 ) -> tuple[list[int], list[dict[str, Any]], Optional[str]]:
-    """
-    Returns (ids_chunk, people_records, error_str_or_none)
-    """
     if not person_ids:
         return person_ids, [], None
     url = "https://statsapi.mlb.com/api/v1/people"
@@ -209,22 +220,23 @@ def fetch_people_chunk(
 
 def extract_code(field: Any, key: str) -> str:
     """
-    StatsAPI usually returns a dict like {"code": "R"} but sometimes can be a string.
+    StatsAPI typically uses dict fields like {"code":"R"}, but sometimes may produce a string.
+    This function is defensive: returns "" if not parseable.
     """
     if isinstance(field, dict):
         v = field.get(key, "")
         return "" if v is None else str(v)
     if isinstance(field, str):
-        # already a code-like string
         return field.strip()
     return ""
 
 
-
 def main() -> None:
     ap = argparse.ArgumentParser(
-        description="Build MLBAM people spine from MiLB team rosters (sportIds 11/12/13/14/16) for seasons 2021–2025. "
-                    "Outputs MLBAM ID + name + DOB + bats/throws + height/weight + position."
+        description=(
+            "Build MLBAM people spine from MiLB team rosters (sportIds 11/12/13/14/16) for seasons 2021–2025. "
+            "Outputs MLBAM ID + name + DOB + bats/throws + height/weight + position + org abbrevs seen."
+        )
     )
     ap.add_argument("--start-year", type=int, default=2021)
     ap.add_argument("--end-year", type=int, default=2025)
@@ -272,11 +284,10 @@ def main() -> None:
 
     roster_tasks: list[RosterTask] = []
     team_counts_by_year: dict[int, int] = {}
-
     team_parent_abbrev_by_season: dict[int, dict[int, str]] = {}
 
     for season in range(start_year, end_year + 1):
-        teams, team_id_to_parent_abbrev = get_milb_teams_for_season(
+        teams, team_id_to_parent_abbrev = get_milb_teams_and_parent_abbrev(
             session=session,
             season=season,
             timeout_sec=args.timeout,
@@ -298,15 +309,12 @@ def main() -> None:
 
         for tid in team_ids:
             roster_tasks.append(RosterTask(season=season, team_id=tid))
-    
+
     if not roster_tasks:
         raise SystemExit("No roster tasks created (no teams found).")
 
     seasons_seen: dict[int, set[int]] = {}
     org_abbrevs_seen: dict[int, set[str]] = {}
-    parent_map = team_parent_abbrev_by_season.get(task.season, {})
-    team_abbrev = parent_map.get(task.team_id, "")
-
     roster_errors = 0
 
     roster_manifest_rows: list[dict[str, str]] = []
@@ -346,12 +354,14 @@ def main() -> None:
             if err is not None:
                 roster_errors += 1
             else:
+                parent_map = team_parent_abbrev_by_season.get(task.season, {})
+                team_abbrev = parent_map.get(task.team_id, "")
+
                 for pid in ids:
                     seasons_seen.setdefault(pid, set()).add(task.season)
                     if team_abbrev:
                         org_abbrevs_seen.setdefault(pid, set()).add(team_abbrev)
-            
-            # lightweight progress
+
             if done % 200 == 0 or done == total:
                 print(f"[ROSTERS] {done}/{total} done; players so far={len(seasons_seen)}; errors={roster_errors}")
 
@@ -406,6 +416,7 @@ def main() -> None:
                         pid = int(p.get("id"))
                     except Exception:
                         continue
+
                     birth = str(p.get("birthDate", "") or "")
                     yob, mob, dob_day = parse_birth_date(birth)
 
@@ -422,11 +433,11 @@ def main() -> None:
                         pos = "" if v is None else str(v)
                     elif isinstance(primary_pos, str):
                         pos = primary_pos.strip()
-                    
-                    name_full = str(p.get("fullName", "") or "")
-                    birth_date = birth  # already a string
 
-                    # Only store bio if at least one key identifier is present
+                    name_full = str(p.get("fullName", "") or "")
+                    birth_date = birth
+
+                    # Only store bios if at least one key identifier exists
                     if name_full or birth_date:
                         bios[pid] = {
                             "name_full": name_full,
@@ -441,9 +452,8 @@ def main() -> None:
                             "pos": pos,
                             "height": str(p.get("height", "") or ""),
                             "weight": str(p.get("weight", "") or ""),
-                            "org_abbrevs_seen": "|".join(sorted(org_abbrevs_seen.get(pid, set()))),
                         }
-            
+
             if done % 50 == 0 or done == total:
                 print(f"[PEOPLE] {done}/{total} chunks done; bios={len(bios)}; errors={people_errors}")
 
@@ -462,8 +472,8 @@ def main() -> None:
         "pos",
         "height",
         "weight",
-        "org_abbrevs_seen",
         "seasons_seen",
+        "org_abbrevs_seen",
     ]
 
     with out_path.open("w", newline="", encoding="utf-8") as f:
@@ -472,6 +482,7 @@ def main() -> None:
         for pid in all_player_ids:
             b = bios.get(pid, {})
             seasons = sorted(seasons_seen.get(pid, set()))
+            orgs = sorted(org_abbrevs_seen.get(pid, set()))
             w.writerow(
                 {
                     "mlbam_id": str(pid),
@@ -487,8 +498,8 @@ def main() -> None:
                     "pos": b.get("pos", ""),
                     "height": b.get("height", ""),
                     "weight": b.get("weight", ""),
-                    "org_abbrevs_seen": "|".join(sorted(org_abbrevs_seen.get(pid, set()))),
                     "seasons_seen": ",".join(str(x) for x in seasons),
+                    "org_abbrevs_seen": "|".join(orgs),
                 }
             )
 
@@ -502,7 +513,7 @@ def main() -> None:
             w.writerow(r)
 
     print(f"[OK] Wrote people spine: {out_path}")
-    print(f"[OK] Wrote manifest: {manifest_path}")
+    print(f"[OK] Wrote manifest:    {manifest_path}")
     print(f"[INFO] Teams per season: {', '.join(f'{y}:{team_counts_by_year[y]}' for y in sorted(team_counts_by_year))}")
     print(f"[INFO] Players: {len(all_player_ids)} | roster_errors={roster_errors} | people_chunk_errors={people_errors}")
 
