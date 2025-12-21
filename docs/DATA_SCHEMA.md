@@ -14,6 +14,8 @@ Nothing in this document should be interpreted as a claim of modeling performanc
 - **As-of cutoff**: The end of season `report_year - 1`.
 - **Assigned level (`assigned_level`)**: The level the player was most recently assigned to **as of the cutoff**, even if they did not record stats at that level.
 - **Played level (`level_played`)**: The minor league / MLB level at which the statistical line was accrued.
+- **MLBAM ID (`mlbam_id`)**: The canonical, stable player identifier used across all modeling tables.
+- **FGID (`fgid`)**: FanGraphs player identifier; treated as a source-specific alias, not a stable key.
 
 ---
 
@@ -54,7 +56,7 @@ Allowed FV values are discrete:
 This table stores the scouting snapshot and player attributes for the given report year. It also stores the FV for that year (used for diagnostics and optional modeling variants), but the primary supervised task uses `fv_next` as the label constructed from the next year’s FV.
 
 ### Primary key
-- `mlbam_id` (integer or string; treat as stable identifier)
+- `mlbam_id` (integer or string; treated as stable identifier)
 - `report_year` (integer; one of 2021–2025)
 
 ### Columns
@@ -120,11 +122,11 @@ A player may have multiple rows per season if they played at multiple levels. St
 - `league` (string; nullable)
 
 ### Stat line columns
-This project is agnostic to the exact stat set; however, each stat must be defined consistently and documented. Recommended practice:
+This project is agnostic to the exact stat set; however, each stat must be defined consistently and documented.
 
-- Maintain separate columns for hitters vs pitchers, allowing nulls where not applicable, or maintain two stat tables (`player_season_stats_hitting`, `player_season_stats_pitching`).
-
-Minimum required fields depend on your later feature engineering, but typical columns include:
+Recommended practice:
+- Maintain separate stat tables for hitters and pitchers, or
+- Use a unified table with role-appropriate nulls.
 
 **Hitters (examples):**
 - `g`, `pa`, `ab`, `h`, `2b`, `3b`, `hr`, `bb`, `so`, `sb`, `cs`
@@ -134,49 +136,80 @@ Minimum required fields depend on your later feature engineering, but typical co
 
 ---
 
-## Identity Resolution (FGID → MLBAM ID)
+## Identity Resolution and Canonical Player IDs
 
-Canonical modeling tables in this project are keyed by **MLBAM ID** (`mlbam_id`), which is treated as the stable, cross-source player identifier.
+### Canonical Identifier
 
-However, FanGraphs ingestion and parsing stages identify players primarily via:
-- FanGraphs player ID (`fgid`, when available), and
-- player name and URL text.
+All canonical modeling tables in this project are keyed by **MLBAM ID** (`mlbam_id`), which is treated as the stable, cross-source player identifier.
 
-To bridge this gap, the project includes an explicit **identity resolution pipeline** prior to any player-level joins or statistics integration.
+FanGraphs player IDs (`fgid`) and player names are treated as **source-specific identifiers** and are never used as primary keys in modeling tables.
 
-### Identity Resolution Stages
+---
 
-1. **Normalized Identity Construction**
-   - A canonical identity list is built from intermediate FanGraphs outputs (`reports_*.csv`).
-   - Each identity is keyed by:
-     - `fgid` when present, or
-     - a stable synthetic key when `fgid` is missing.
-   - Output:  
-     `data/processed/player_identities.csv`
+### Stage A: MLBAM People Spine Construction
 
-2. **MLBAM Candidate Retrieval**
-   - For each normalized identity, candidate MLBAM player records are retrieved via MLB lookup APIs.
-   - Raw API responses are cached verbatim, with request/response metadata preserved.
-   - Output:
-     - Cached JSON responses under `data/raw/mlbam_lookup/`
-     - Fetch manifest recording HTTP status and provenance
+A standalone **people spine** is constructed using the MLB Stats API, enumerating players who appear on minor-league rosters (DSL, CPX, A, A+, AA, AAA) during seasons 2021–2025.
 
-3. **ID Matching and Crosswalk Construction**
-   - Candidate MLBAM records are evaluated against normalized identities using name and biographical metadata (e.g., date of birth).
-   - Each identity is assigned one of:
-     - `unique` match
-     - `ambiguous` (multiple plausible MLBAM IDs)
-     - `unresolved`
-   - Output:
-     `data/processed/player_id_map.csv`
+This table provides:
+- `mlbam_id`
+- full name and name components
+- date of birth (Y/M/D)
+- bats / throws
+- height / weight
+- primary position
+- seasons observed (for provenance)
 
-### Canonical Identifier Usage
+**Output:**
+data/processed/mlbam_people_spine_2021_2025.csv
 
-- All canonical modeling tables (`player_season`, `player_season_stats`, etc.) use `mlbam_id` as the primary key.
-- `fgid` is retained as a secondary identifier for traceability and debugging.
+This spine is treated as an external reference table and is not recomputed implicitly by downstream steps.
+
+---
+
+### Stage B: FGID → MLBAM Identity Mapping
+
+FanGraphs ingestion and parsing stages identify players via:
+- `fgid` (when present), and
+- player name text.
+
+To bridge FanGraphs-derived data with MLBAM-keyed modeling tables, the project includes an explicit **identity mapping step**.
+
+#### Mapping Inputs
+- FanGraphs-derived identities (`fgid`, `player_name`)
+- MLBAM people spine (name + DOB)
+
+#### Matching Strategy (Deterministic, Ordered)
+Matching is attempted in strict order and stops at the first unique match:
+
+1. Exact normalized first name + last name + full DOB  
+2. Exact normalized last name + full DOB  
+3. Exact normalized full name (only if a single MLBAM candidate exists)
+
+If multiple MLBAM candidates satisfy a rule, the match is marked ambiguous and rejected.
+
+#### Mapping Outcomes
+Each FG identity is assigned one of:
+- `matched_exact_name_dob`
+- `matched_lastname_dob`
+- `matched_name_only_unique`
+- `ambiguous_multiple_candidates`
+- `unmatched_no_candidate`
+
+#### Output
+data/intermediate/identity_map_fgid_to_mlbam.csv
+
+
+This table is an explicit dependency for all downstream joins.
+
+---
+
+### Canonical Usage Rules
+
+- All modeling tables (`player_season`, `player_season_stats`, etc.) require a resolved `mlbam_id`.
+- `fgid` is retained only for traceability and debugging.
 - Rows without a resolved `mlbam_id` are excluded from supervised modeling joins but may be retained for diagnostics or future resolution.
 
-Identity resolution outputs are treated as **data dependencies** for downstream build steps and are not recomputed implicitly.
+Identity resolution outputs are **versioned data artifacts**, not ephemeral logic.
 
 ---
 
@@ -198,12 +231,15 @@ A training example exists for `(mlbam_id, N)` if:
 1. `player_season` row exists for `(mlbam_id, N)` (features)
 2. `player_season` row exists for `(mlbam_id, N+1)` with non-null `fv` (label)
 
-If (2) is missing, the example is **not eligible** for the supervised FV(N+1) task. (Such rows may still be used later for unsupervised representation learning.)
+If (2) is missing, the example is **not eligible** for the supervised FV(N+1) task.
 
-### As-of / leakage rule
+---
+
+## As-of / Leakage Rules
+
 For report year `N`:
-- Stats included must satisfy `season_year ≤ N-1`.
-- `assigned_level` is the most recent assignment **as-of the end of season N-1**.
+- Included stats must satisfy `season_year ≤ N-1`.
+- `assigned_level` reflects the most recent assignment **as-of the end of season N-1**.
 
 ---
 
@@ -211,20 +247,21 @@ For report year `N`:
 
 Similarity neighborhoods are used only for evaluation diagnostics (conditional variance, neighborhood coherence).
 
-Current (initial) neighborhood definition:
+Initial definition:
 - Hard strata: `role`, `assigned_level`, `age_bin` (raw age binned at report year `N`)
-- Soft distance: numeric feature vectors (to be defined in feature engineering), with an explicit sparsity fallback rule
+- Soft distance: numeric feature vectors (defined during feature engineering)
+- Explicit sparsity fallback rule (documented prior to metric computation)
 
-The similarity definition may be revised after stat normalization; revisions must be recorded in `RESEARCH_LOG.md` and updated in `DESIGN_DECISIONS.md` if binding.
+Revisions must be recorded in `RESEARCH_LOG.md` and, if binding, in `DESIGN_DECISIONS.md`.
 
 ---
 
 ## Evaluation Protocol (Operational)
 
 Protocol C is used:
-- Primary: forward-chaining by year (train on earlier years, evaluate on later years)
+- Primary: forward-chaining by year
 - Secondary: player-holdout robustness checks
 
-Exact year splits and player-holdout sampling rules are defined in the evaluation code and documented in the relevant experiment config / notebook.
+Exact splits and sampling rules are defined in evaluation code and experiment configs.
 
 ---
