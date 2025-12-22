@@ -100,6 +100,7 @@ class IdentityRow:
     dob_est_ymd: str
     yob_est: str
 
+
 @dataclass(frozen=True)
 class SpineRow:
     mlbam_id: str
@@ -109,6 +110,7 @@ class SpineRow:
     mob: str
     dob: str
     org_abbrevs_seen: str
+
 
 @dataclass(frozen=True)
 class AncillaryRow:
@@ -150,6 +152,9 @@ def read_identities(path: Path) -> list[IdentityRow]:
             mob = (row.get("mob") or "").strip()
             dob = (row.get("dob") or "").strip()
 
+        dob_est_ymd = (row.get("dob_est_ymd") or "").strip()
+        yob_est = (row.get("yob_est") or "").strip()
+
         out.append(
             IdentityRow(
                 identity_key=(row.get("identity_key") or "").strip(),
@@ -162,11 +167,11 @@ def read_identities(path: Path) -> list[IdentityRow]:
                 org_abbrevs=(row.get("org_abbrevs") or "").strip(),
                 published_date_latest=(row.get("published_date_latest") or "").strip(),
                 age_float=(row.get("age_float") or "").strip(),
-                dob_est_ymd=(row.get("dob_est_ymd") or "").strip(),
-                yob_est=(row.get("yob_est") or "").strip(),
+                dob_est_ymd=dob_est_ymd,
+                yob_est=yob_est,
             )
         )
-    
+
     return out
 
 
@@ -175,7 +180,6 @@ def read_spine(path: Path) -> list[SpineRow]:
     if not rows:
         raise RuntimeError(f"{path}: parsed zero rows")
 
-    # Detect likely column names (be permissive)
     keys = set(rows[0].keys())
 
     def pick(*cands: str) -> Optional[str]:
@@ -229,7 +233,6 @@ def read_ancillary(path: Path) -> list[AncillaryRow]:
     if not rows:
         raise RuntimeError(f"{path}: parsed zero rows")
 
-    # Validate required columns exist
     required = {"MLBAM_ID", "First", "Last", "YOB", "MOB", "DOB"}
     missing = required - set(rows[0].keys())
     if missing:
@@ -240,21 +243,14 @@ def read_ancillary(path: Path) -> list[AncillaryRow]:
         mlbam = (r.get("MLBAM_ID") or "").strip()
         if not mlbam:
             continue
-
-        first = (r.get("First") or "").strip()
-        last = (r.get("Last") or "").strip()
-        yob = (r.get("YOB") or "").strip()
-        mob = (r.get("MOB") or "").strip()
-        dob = (r.get("DOB") or "").strip()
-
         out.append(
             AncillaryRow(
                 mlbam_id=mlbam,
-                first=first,
-                last=last,
-                yob=yob,
-                mob=mob,
-                dob=dob,
+                first=(r.get("First") or "").strip(),
+                last=(r.get("Last") or "").strip(),
+                yob=(r.get("YOB") or "").strip(),
+                mob=(r.get("MOB") or "").strip(),
+                dob=(r.get("DOB") or "").strip(),
             )
         )
 
@@ -281,7 +277,7 @@ def unique_or_none(ids: list[str]) -> Optional[str]:
 def tie_break_by_estimated_dob(
     cand_ids: list[str],
     ident_dob_est_ymd: str,
-    spine_dob_by_id: dict[str, Optional[date]],
+    dob_by_id: dict[str, Optional[date]],
     tolerance_days: int = 45,
 ) -> Optional[str]:
     """
@@ -293,7 +289,7 @@ def tie_break_by_estimated_dob(
         return None
     hits: list[str] = []
     for cid in sorted(set(cand_ids)):
-        dob_c = spine_dob_by_id.get(cid)
+        dob_c = dob_by_id.get(cid)
         if dob_c is None:
             continue
         if abs((dob_c - dob_est).days) <= tolerance_days:
@@ -303,10 +299,13 @@ def tie_break_by_estimated_dob(
 
 
 def main() -> None:
-    ap = argparse.ArgumentParser(description="Build FG identity → MLBAM ID crosswalk using MLBAM people spine.")
+    ap = argparse.ArgumentParser(description="Build FG identity → MLBAM ID crosswalk using MLBAM people spine + ancillary.")
     ap.add_argument("--identities", default="data/processed/player_identities.csv", help="Input identities CSV.")
     ap.add_argument("--spine", default="data/processed/mlbam_people_spine_2021_2025.csv", help="Input MLBAM spine CSV.")
-    ap.add_argument("--ancillary", default="src/resources/MLBAM_ancillary_data.csv", help="Optional curated MLBAM ancillary CSV (MLBAM_ID, First, Last, YOB, MOB, DOB).",
+    ap.add_argument(
+        "--ancillary",
+        default="src/resources/MLBAM_ancillary_data.csv",
+        help="Optional curated MLBAM ancillary CSV (MLBAM_ID, First, Last, YOB, MOB, DOB).",
     )
     ap.add_argument("--out", default="data/intermediate/identity_map_fgid_to_mlbam.csv", help="Output mapping CSV.")
     ap.add_argument(
@@ -314,6 +313,7 @@ def main() -> None:
         default="data/intermediate/identity_map_fgid_to_mlbam_manifest.csv",
         help="Output manifest/summary CSV.",
     )
+    ap.add_argument("--debug-name", default="", help="If set, print candidate debug for this exact name (case-insensitive).")
     args = ap.parse_args()
 
     identities_path = Path(args.identities)
@@ -323,46 +323,47 @@ def main() -> None:
 
     identities = read_identities(identities_path)
     spine = read_spine(spine_path)
+
     ancillary_path = Path(args.ancillary)
     ancillary: list[AncillaryRow] = []
     if ancillary_path.exists():
         ancillary = read_ancillary(ancillary_path)
-    else:
-        ancillary = []
-    
+
+    # Unified indexes (spine + ancillary)
     idx_first_last_dob: dict[tuple[str, str, str, str, str], list[str]] = {}
     idx_last_dob: dict[tuple[str, str, str, str], list[str]] = {}
     idx_full_name: dict[tuple[str], list[str]] = {}
 
-    # Ancillary-only indexes (curated reference)
-    idx_anc_first_last_dob: dict[tuple[str, str, str, str, str], list[str]] = {}
-    idx_anc_last_dob: dict[tuple[str, str, str, str], list[str]] = {}
-    idx_anc_full_name: dict[tuple[str], list[str]] = {}
+    # Aux maps for tie-breaks (spine + ancillary for DOB/YOB; orgs only from spine)
+    yob_by_id: dict[str, str] = {}
+    dob_by_id: dict[str, Optional[date]] = {}
+    orgs_by_id: dict[str, set[str]] = {}
 
-    spine_yob_by_id: dict[str, str] = {}
-    spine_orgs_by_id: dict[str, set[str]] = {}
-    spine_dob_by_id: dict[str, Optional[date]] = {}
-
+    # --- Spine contribution ---
     for s in spine:
         fn = norm_text(s.name_first)
         ln = norm_text(s.name_last)
         full = norm_text(f"{s.name_first} {s.name_last}")
 
         y, m, d = (s.yob.strip(), s.mob.strip(), s.dob.strip())
-        if y and m and d:
+        if fn and ln and y and m and d:
             add_to_index(idx_first_last_dob, (fn, ln, y, m, d), s.mlbam_id)
+        if ln and y and m and d:
             add_to_index(idx_last_dob, (ln, y, m, d), s.mlbam_id)
-            spine_dob_by_id[s.mlbam_id] = parse_date_ymd(f"{y}-{m}-{d}")
-        else:
-            spine_dob_by_id[s.mlbam_id] = None
-        
+
         if full:
             add_to_index(idx_full_name, (full,), s.mlbam_id)
 
-        spine_yob_by_id[s.mlbam_id] = (s.yob or "").strip()
-        if s.org_abbrevs_seen:
-            spine_orgs_by_id[s.mlbam_id] = set(x for x in s.org_abbrevs_seen.split("|") if x.strip())
+        yob_by_id[s.mlbam_id] = (s.yob or "").strip()
+        if y and m and d:
+            dob_by_id[s.mlbam_id] = parse_date_ymd(f"{y}-{m}-{d}")
+        else:
+            dob_by_id[s.mlbam_id] = None
 
+        if s.org_abbrevs_seen:
+            orgs_by_id[s.mlbam_id] = set(x for x in s.org_abbrevs_seen.split("|") if x.strip())
+
+    # --- Ancillary contribution (into SAME indexes) ---
     for a in ancillary:
         fn = norm_text(a.first)
         ln = norm_text(a.last)
@@ -370,11 +371,18 @@ def main() -> None:
 
         y, m, d = (a.yob.strip(), a.mob.strip(), a.dob.strip())
         if fn and ln and y and m and d:
-            add_to_index(idx_anc_first_last_dob, (fn, ln, y, m, d), a.mlbam_id)
+            add_to_index(idx_first_last_dob, (fn, ln, y, m, d), a.mlbam_id)
         if ln and y and m and d:
-            add_to_index(idx_anc_last_dob, (ln, y, m, d), a.mlbam_id)
+            add_to_index(idx_last_dob, (ln, y, m, d), a.mlbam_id)
+
         if full:
-            add_to_index(idx_anc_full_name, (full,), a.mlbam_id)
+            add_to_index(idx_full_name, (full,), a.mlbam_id)
+
+        # populate yob/dob maps if missing
+        if a.mlbam_id not in yob_by_id or not yob_by_id.get(a.mlbam_id, ""):
+            yob_by_id[a.mlbam_id] = y
+        if a.mlbam_id not in dob_by_id or dob_by_id.get(a.mlbam_id) is None:
+            dob_by_id[a.mlbam_id] = parse_date_ymd(f"{y}-{m}-{d}") if (y and m and d) else None
 
     out_path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -392,6 +400,7 @@ def main() -> None:
         "match_status",
         "match_method",
         "candidate_mlbam_ids",
+        "matched_mlbam_id",  # explicit even when candidates exist
         "identity_yob",
         "identity_mob",
         "identity_dob",
@@ -401,6 +410,8 @@ def main() -> None:
         "identity_dob_est_ymd",
         "identity_yob_est",
     ]
+
+    debug_target = norm_text(args.debug_name) if args.debug_name else ""
 
     with out_path.open("w", newline="", encoding="utf-8") as f:
         w = csv.DictWriter(f, fieldnames=out_fields)
@@ -418,7 +429,7 @@ def main() -> None:
             match_status: str = ""
             candidates: list[str] = []
 
-            # Rule 1: exact normalized first+last + full DOB
+            # Rule 1: exact normalized first+last + full DOB (spine+ancillary)
             if has_dob:
                 candidates = idx_first_last_dob.get((first_norm, last_norm, y, m, d), [])
                 u = unique_or_none(candidates)
@@ -427,37 +438,16 @@ def main() -> None:
                     match_method = "exact_name_dob"
                     match_status = "matched_exact_name_dob"
 
-            # Rule 2a: exact last + full DOB
+            # Rule 2: exact last + full DOB (spine+ancillary)  <-- FIXED
             if not mlbam_id and has_dob:
-                candidates = []
-                candidates.extend(idx_full_name.get((full_norm,), []))
-                if ancillary:
-                    candidates.extend(idx_anc_full_name.get((full_norm,), []))
+                candidates = idx_last_dob.get((last_norm, y, m, d), [])
                 u = unique_or_none(candidates)
                 if u:
                     mlbam_id = u
                     match_method = "lastname_dob"
                     match_status = "matched_lastname_dob"
-            
-            # Rule 2b (ancillary): exact normalized first+last + full DOB
-            if not mlbam_id and has_dob and ancillary:
-                candidates = idx_anc_first_last_dob.get((first_norm, last_norm, y, m, d), [])
-                u = unique_or_none(candidates)
-                if u:
-                    mlbam_id = u
-                    match_method = "ancillary_exact_name_dob"
-                    match_status = "matched_ancillary_exact_name_dob"
-            
-            # Rule 2c (ancillary): exact last + full DOB
-            if not mlbam_id and has_dob and ancillary:
-                candidates = idx_anc_last_dob.get((last_norm, y, m, d), [])
-                u = unique_or_none(candidates)
-                if u:
-                    mlbam_id = u
-                    match_method = "ancillary_lastname_dob"
-                    match_status = "matched_ancillary_lastname_dob"
 
-            # Rule 3: full-name rule (+ tie-breaks if ambiguous)
+            # Rule 3: full-name rule (+ tie-breaks if ambiguous) (spine+ancillary)  <-- FIXED
             if not mlbam_id:
                 candidates = idx_full_name.get((full_norm,), [])
                 cand_unique = sorted(set(candidates))
@@ -470,36 +460,38 @@ def main() -> None:
                 else:
                     chosen: Optional[str] = None
 
+                    # Tie-break A: org abbrev intersection (spine-only org provenance)
                     ident_orgs = [x for x in ident.org_abbrevs.split("|") if x.strip()]
-                    if ident_orgs and spine_orgs_by_id and cand_unique:
+                    if ident_orgs and cand_unique:
                         hits = []
                         for cid in cand_unique:
-                            orgs = spine_orgs_by_id.get(cid, set())
+                            orgs = orgs_by_id.get(cid, set())
                             if any(o in orgs for o in ident_orgs):
                                 hits.append(cid)
+                        hits = sorted(set(hits))
                         if len(hits) == 1:
                             chosen = hits[0]
                             match_method = "name_plus_org_unique"
                             match_status = "matched_name_with_tiebreak"
 
+                    # Tie-break B: estimated DOB proximity (uses spine+ancillary DOB map)
                     if chosen is None and cand_unique:
-                        # Prefer estimated DOB proximity (day-level)
                         chosen = tie_break_by_estimated_dob(
                             cand_ids=cand_unique,
                             ident_dob_est_ymd=ident.dob_est_ymd,
-                            spine_dob_by_id=spine_dob_by_id,
+                            dob_by_id=dob_by_id,
                             tolerance_days=45,
                         )
                         if chosen is not None:
                             match_method = "name_plus_est_dob_unique"
                             match_status = "matched_name_with_tiebreak"
 
+                    # Tie-break C: estimated YOB +/-1 (uses spine+ancillary YOB map)
                     if chosen is None and cand_unique and ident.yob_est and ident.yob_est.isdigit():
-                        # Fallback: estimated YOB (year-level, +/-1)
                         est_yob = int(ident.yob_est)
                         hits = []
                         for cid in cand_unique:
-                            yob_c = spine_yob_by_id.get(cid, "")
+                            yob_c = (yob_by_id.get(cid, "") or "").strip()
                             if yob_c.isdigit() and abs(int(yob_c) - est_yob) <= 1:
                                 hits.append(cid)
                         hits = sorted(set(hits))
@@ -515,7 +507,7 @@ def main() -> None:
                 matched += 1
                 by_status[match_status] = by_status.get(match_status, 0) + 1
             else:
-                # classify ambiguity/unmatched primarily from name candidates
+                # classify ambiguity/unmatched based on candidates at the final attempted rule
                 if candidates and len(set(candidates)) > 1:
                     ambiguous += 1
                     match_status = "ambiguous_multiple_candidates"
@@ -527,6 +519,11 @@ def main() -> None:
                     match_method = "none"
                     by_status[match_status] = by_status.get(match_status, 0) + 1
 
+            if debug_target and norm_text(ident.player_name) == debug_target:
+                print("[DEBUG]", ident.player_name)
+                print("        full_norm:", full_norm)
+                print("        candidates:", sorted(set(candidates)))
+
             w.writerow(
                 {
                     "identity_key": ident.identity_key,
@@ -537,6 +534,7 @@ def main() -> None:
                     "match_status": match_status,
                     "match_method": match_method,
                     "candidate_mlbam_ids": "|".join(sorted(set(candidates))) if candidates else "",
+                    "matched_mlbam_id": mlbam_id,
                     "identity_yob": y,
                     "identity_mob": m,
                     "identity_dob": d,
