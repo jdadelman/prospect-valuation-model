@@ -110,6 +110,15 @@ class SpineRow:
     dob: str
     org_abbrevs_seen: str
 
+@dataclass(frozen=True)
+class AncillaryRow:
+    mlbam_id: str
+    first: str
+    last: str
+    yob: str
+    mob: str
+    dob: str
+
 
 def read_csv_dicts(path: Path) -> Iterable[dict[str, str]]:
     with path.open("r", newline="", encoding="utf-8") as f:
@@ -215,6 +224,45 @@ def read_spine(path: Path) -> list[SpineRow]:
     return out
 
 
+def read_ancillary(path: Path) -> list[AncillaryRow]:
+    rows = list(read_csv_dicts(path))
+    if not rows:
+        raise RuntimeError(f"{path}: parsed zero rows")
+
+    # Validate required columns exist
+    required = {"MLBAM_ID", "First", "Last", "YOB", "MOB", "DOB"}
+    missing = required - set(rows[0].keys())
+    if missing:
+        raise RuntimeError(f"{path}: missing required columns: {sorted(missing)}")
+
+    out: list[AncillaryRow] = []
+    for r in rows:
+        mlbam = (r.get("MLBAM_ID") or "").strip()
+        if not mlbam:
+            continue
+
+        first = (r.get("First") or "").strip()
+        last = (r.get("Last") or "").strip()
+        yob = (r.get("YOB") or "").strip()
+        mob = (r.get("MOB") or "").strip()
+        dob = (r.get("DOB") or "").strip()
+
+        out.append(
+            AncillaryRow(
+                mlbam_id=mlbam,
+                first=first,
+                last=last,
+                yob=yob,
+                mob=mob,
+                dob=dob,
+            )
+        )
+
+    if not out:
+        raise RuntimeError(f"{path}: parsed zero usable rows")
+    return out
+
+
 def add_to_index(index: dict[tuple[str, ...], list[str]], key: tuple[str, ...], mlbam_id: str) -> None:
     if not mlbam_id:
         return
@@ -258,6 +306,8 @@ def main() -> None:
     ap = argparse.ArgumentParser(description="Build FG identity → MLBAM ID crosswalk using MLBAM people spine.")
     ap.add_argument("--identities", default="data/processed/player_identities.csv", help="Input identities CSV.")
     ap.add_argument("--spine", default="data/processed/mlbam_people_spine_2021_2025.csv", help="Input MLBAM spine CSV.")
+    ap.add_argument("--ancillary", default="src/resources/MLBAM_ancillary_data.csv", help="Optional curated MLBAM ancillary CSV (MLBAM_ID, First, Last, YOB, MOB, DOB).",
+    )
     ap.add_argument("--out", default="data/intermediate/identity_map_fgid_to_mlbam.csv", help="Output mapping CSV.")
     ap.add_argument(
         "--manifest",
@@ -273,11 +323,21 @@ def main() -> None:
 
     identities = read_identities(identities_path)
     spine = read_spine(spine_path)
-
+    ancillary_path = Path(args.ancillary)
+    ancillary: list[AncillaryRow] = []
+    if ancillary_path.exists():
+        ancillary = read_ancillary(ancillary_path)
+    else:
+        ancillary = []
+    
     idx_first_last_dob: dict[tuple[str, str, str, str, str], list[str]] = {}
     idx_last_dob: dict[tuple[str, str, str, str], list[str]] = {}
     idx_full_name: dict[tuple[str], list[str]] = {}
 
+    # Ancillary-only indexes (for supplemental matching)
+    idx_anc_first_last_dob: dict[tuple[str, str, str, str, str], list[str]] = {}
+    idx_anc_last_dob: dict[tuple[str, str, str, str], list[str]] = {}
+    
     spine_yob_by_id: dict[str, str] = {}
     spine_orgs_by_id: dict[str, set[str]] = {}
     spine_dob_by_id: dict[str, Optional[date]] = {}
@@ -301,6 +361,15 @@ def main() -> None:
         spine_yob_by_id[s.mlbam_id] = (s.yob or "").strip()
         if s.org_abbrevs_seen:
             spine_orgs_by_id[s.mlbam_id] = set(x for x in s.org_abbrevs_seen.split("|") if x.strip())
+
+    for a in ancillary:
+        fn = norm_text(a.first)
+        ln = norm_text(a.last)
+        y, m, d = (a.yob.strip(), a.mob.strip(), a.dob.strip())
+        if fn and ln and y and m and d:
+            add_to_index(idx_anc_first_last_dob, (fn, ln, y, m, d), a.mlbam_id)
+        if ln and y and m and d:
+            add_to_index(idx_anc_last_dob, (ln, y, m, d), a.mlbam_id)
 
     out_path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -353,7 +422,7 @@ def main() -> None:
                     match_method = "exact_name_dob"
                     match_status = "matched_exact_name_dob"
 
-            # Rule 2: exact last + full DOB
+            # Rule 2a: exact last + full DOB
             if not mlbam_id and has_dob:
                 candidates = idx_last_dob.get((last_norm, y, m, d), [])
                 u = unique_or_none(candidates)
@@ -361,6 +430,24 @@ def main() -> None:
                     mlbam_id = u
                     match_method = "lastname_dob"
                     match_status = "matched_lastname_dob"
+            
+            # Rule 2b (ancillary): exact normalized first+last + full DOB
+            if not mlbam_id and has_dob and ancillary:
+                candidates = idx_anc_first_last_dob.get((first_norm, last_norm, y, m, d), [])
+                u = unique_or_none(candidates)
+                if u:
+                    mlbam_id = u
+                    match_method = "ancillary_exact_name_dob"
+                    match_status = "matched_ancillary_exact_name_dob"
+            
+            # Rule 2c (ancillary): exact last + full DOB
+            if not mlbam_id and has_dob and ancillary:
+                candidates = idx_anc_last_dob.get((last_norm, y, m, d), [])
+                u = unique_or_none(candidates)
+                if u:
+                    mlbam_id = u
+                    match_method = "ancillary_lastname_dob"
+                    match_status = "matched_ancillary_lastname_dob"
 
             # Rule 3: full-name rule (+ tie-breaks if ambiguous)
             if not mlbam_id:
