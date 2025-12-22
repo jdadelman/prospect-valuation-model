@@ -148,14 +148,19 @@ def read_tools_rows(path: Path) -> Iterable[dict[str, str]]:
         missing = required - set(r.fieldnames or [])
         if missing:
             raise RuntimeError(f"{path}: missing required columns: {sorted(missing)}")
-
-        has_meta_age = "meta_age" in (r.fieldnames or [])
+        
+        cols = set(r.fieldnames or [])
+        want = ["meta_age", "meta_height", "meta_weight", "meta_bats", "meta_throws", "meta_pos", "meta_bat_thr"]
         for row in r:
             out = {
                 "rk": (row.get("rk") or "").strip(),
                 "fgid": (row.get("fgid") or "").strip(),
-                "meta_age": (row.get("meta_age") or "").strip() if has_meta_age else "",
             }
+            for k in want:
+                if k in cols:
+                    out[k] = (row.get(k) or "").strip()
+                else:
+                    out[k] = ""
             yield out
 
 
@@ -381,6 +386,11 @@ def main() -> None:
         "--out",
         default="data/processed/player_identities.csv",
         help="Output path for canonical identities CSV",
+    )
+    ap.add_argument(
+        "--out-seasons",
+        default="data/processed/player_identity_seasons.csv",
+        help="Output path for season-grain identities (one row per identity_key + report_year).",
     )
     args = ap.parse_args()
 
