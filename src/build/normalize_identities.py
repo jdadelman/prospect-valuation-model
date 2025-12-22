@@ -232,17 +232,20 @@ def estimate_dob_from_pub_and_age(published_date_latest: str, age_float: str) ->
 
 def build_identities(reports_dir: Path) -> list[IdentityAgg]:
     by_key: dict[str, IdentityAgg] = {}
+    season_rows: list[dict[str, str]] = []
 
-    # Build auxiliary index from tools_*.csv: fgid -> list of meta_age floats
-    age_by_fgid: dict[str, list[float]] = defaultdict(list)
+    # Build auxiliary index from tools_*.csv: (fgid, report_year, rk) -> meta fields
+    tools_by_key: dict[tuple[str, int, int], dict[str, str]] = {}
     for tools_path in iter_tools_csvs(reports_dir):
+        # Infer report_year from filename: tools_<slug>.csv does not directly encode year reliably
+        # join via reports rows (rk+fgid+report_year); storing per-file keyed by (fgid,rk).
+        # report_year attached during the reports pass.
         for row in read_tools_rows(tools_path):
             fgid = row.get("fgid", "").strip()
-            if not fgid:
+            rk = parse_int(row.get("rk", ""))
+            if not fgid or rk is None:
                 continue
-            age = parse_float(row.get("meta_age", ""))
-            if age is not None:
-                age_by_fgid[fgid].append(age)
+            tools_by_key[(fgid, -1, rk)] = row  # placeholder year; fixed during reports pass
 
     for csv_path in iter_report_csvs(reports_dir):
         for row in read_reports_rows(csv_path):
@@ -317,6 +320,83 @@ def build_identities(reports_dir: Path) -> list[IdentityAgg]:
     return sorted(by_key.values(), key=sort_key)
 
 
+def build_identity_seasons(reports_dir: Path) -> list[dict[str, str]]:
+    """
+    Construct season-grain snapshot rows keyed by (identity_key, report_year).
+    This is the correct place for year-varying attributes (height/weight/position/bats/throws/age).
+    """
+    # Index tools rows by (tools_filename, rk, fgid) if available; at minimum (rk, fgid) per file.
+    tools_index_by_file: dict[str, dict[tuple[str, int], dict[str, str]]] = {}
+
+    for tools_path in iter_tools_csvs(reports_dir):
+        per_file: dict[tuple[str, int], dict[str, str]] = {}
+        for trow in read_tools_rows(tools_path):
+            fgid = (trow.get("fgid") or "").strip()
+            rk = parse_int(trow.get("rk") or "")
+            if not fgid or rk is None:
+                continue
+            per_file[(fgid, rk)] = trow
+        tools_index_by_file[tools_path.name] = per_file
+
+    out: list[dict[str, str]] = []
+
+    for csv_path in iter_report_csvs(reports_dir):
+        # Determine corresponding tools filename (same slug pattern):
+        # reports_<slug>.csv -> tools_<slug>.csv
+        tools_name = csv_path.name.replace("reports_", "tools_", 1)
+        tools_map = tools_index_by_file.get(tools_name, {})
+
+        for row in read_reports_rows(csv_path):
+            fgid = row["fgid"].strip()
+            player_name = norm_space(row["player_name"])
+            player_url = norm_space(row["player_url"])
+            org_label = norm_space(row["org_label"])
+            published_date = norm_space(row["published_date"])
+            ry = parse_int(row["report_year"])
+            rk = parse_int(row["rk"])
+
+            if ry is None or rk is None:
+                continue
+
+            identity_key = fgid if fgid else stable_fallback_id(player_name, player_url)
+
+            org_abbrev = org_abbrev_from_org_label(org_label)
+
+            trow = tools_map.get((fgid, rk), {}) if fgid else {}
+
+            # Back-compat split if only meta_bat_thr is available
+            meta_bats = (trow.get("meta_bats") or "").strip()
+            meta_throws = (trow.get("meta_throws") or "").strip()
+            if (not meta_bats and not meta_throws) and (trow.get("meta_bat_thr") or "").strip():
+                s = (trow.get("meta_bat_thr") or "").strip()
+                # expected: "R / R" or similar
+                parts = [p.strip() for p in s.split("/") if p.strip()]
+                if len(parts) == 2:
+                    meta_bats, meta_throws = parts[0], parts[1]
+
+            out.append(
+                {
+                    "identity_key": identity_key,
+                    "fgid": fgid,
+                    "report_year": str(ry),
+                    "rk": str(rk),
+                    "player_name": player_name,
+                    "player_url": player_url,
+                    "org_label": org_label,
+                    "org_abbrev": org_abbrev,
+                    "published_date": published_date,
+                    "meta_age": (trow.get("meta_age") or "").strip(),
+                    "meta_height": (trow.get("meta_height") or "").strip(),
+                    "meta_weight": (trow.get("meta_weight") or "").strip(),
+                    "meta_pos": (trow.get("meta_pos") or "").strip(),
+                    "meta_bats": meta_bats,
+                    "meta_throws": meta_throws,
+                }
+            )
+
+    return out
+
+
 def write_identities(identities: list[IdentityAgg], out_path: Path) -> None:
     out_path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -373,6 +453,32 @@ def write_identities(identities: list[IdentityAgg], out_path: Path) -> None:
             )
 
 
+def write_identity_seasons(rows: list[dict[str, str]], out_path: Path) -> None:
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    fieldnames = [
+        "identity_key",
+        "fgid",
+        "report_year",
+        "rk",
+        "player_name",
+        "player_url",
+        "org_label",
+        "org_abbrev",
+        "published_date",
+        "meta_age",
+        "meta_height",
+        "meta_weight",
+        "meta_pos",
+        "meta_bats",
+        "meta_throws",
+    ]
+    with out_path.open("w", newline="", encoding="utf-8") as f:
+        w = csv.DictWriter(f, fieldnames=fieldnames)
+        w.writeheader()
+        for r in rows:
+            w.writerow({k: (r.get(k) or "") for k in fieldnames})
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(
         description="Normalize player identities from intermediate FanGraphs reports CSVs into a canonical list."
@@ -401,6 +507,12 @@ def main() -> None:
     identities = build_identities(reports_dir)
     out_path = Path(args.out)
     write_identities(identities, out_path)
+    print(f"[OK] Wrote {n_total} identities -> {out_path}")
+
+    season_rows = build_identity_seasons(reports_dir)
+    out_seasons = Path(args.out_seasons)
+    write_identity_seasons(season_rows, out_seasons)
+    print(f"[OK] Wrote season identities: {len(season_rows)} rows -> {out_seasons}")
 
     n_total = len(identities)
     n_missing_fgid = sum(1 for a in identities if not a.fgid)
@@ -408,7 +520,6 @@ def main() -> None:
     n_with_age = sum(1 for a in identities if a.ages)
     n_with_pub = sum(1 for a in identities if a.published_dates)
 
-    print(f"[OK] Wrote {n_total} identities -> {out_path}")
     print(f"     Missing FGID: {n_missing_fgid} ({(n_missing_fgid / max(n_total, 1)):.1%})")
     print(f"     With org abbrev: {n_with_org} ({(n_with_org / max(n_total, 1)):.1%})")
     print(f"     With age samples: {n_with_age} ({(n_with_age / max(n_total, 1)):.1%})")
