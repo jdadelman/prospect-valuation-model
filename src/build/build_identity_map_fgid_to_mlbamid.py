@@ -334,10 +334,11 @@ def main() -> None:
     idx_last_dob: dict[tuple[str, str, str, str], list[str]] = {}
     idx_full_name: dict[tuple[str], list[str]] = {}
 
-    # Ancillary-only indexes (for supplemental matching)
+    # Ancillary-only indexes (curated reference)
     idx_anc_first_last_dob: dict[tuple[str, str, str, str, str], list[str]] = {}
     idx_anc_last_dob: dict[tuple[str, str, str, str], list[str]] = {}
-    
+    idx_anc_full_name: dict[tuple[str], list[str]] = {}
+
     spine_yob_by_id: dict[str, str] = {}
     spine_orgs_by_id: dict[str, set[str]] = {}
     spine_dob_by_id: dict[str, Optional[date]] = {}
@@ -365,11 +366,15 @@ def main() -> None:
     for a in ancillary:
         fn = norm_text(a.first)
         ln = norm_text(a.last)
+        full = norm_text(f"{a.first} {a.last}")
+
         y, m, d = (a.yob.strip(), a.mob.strip(), a.dob.strip())
         if fn and ln and y and m and d:
             add_to_index(idx_anc_first_last_dob, (fn, ln, y, m, d), a.mlbam_id)
         if ln and y and m and d:
             add_to_index(idx_anc_last_dob, (ln, y, m, d), a.mlbam_id)
+        if full:
+            add_to_index(idx_anc_full_name, (full,), a.mlbam_id)
 
     out_path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -424,7 +429,10 @@ def main() -> None:
 
             # Rule 2a: exact last + full DOB
             if not mlbam_id and has_dob:
-                candidates = idx_last_dob.get((last_norm, y, m, d), [])
+                candidates = []
+                candidates.extend(idx_full_name.get((full_norm,), []))
+                if ancillary:
+                    candidates.extend(idx_anc_full_name.get((full_norm,), []))
                 u = unique_or_none(candidates)
                 if u:
                     mlbam_id = u
