@@ -16,6 +16,8 @@ Nothing in this document should be interpreted as a claim of modeling performanc
 - **Played level (`level_played`)**: The minor league / MLB level at which the statistical line was accrued.
 - **MLBAM ID (`mlbam_id`)**: The canonical, stable player identifier used across all modeling tables.
 - **FGID (`fgid`)**: FanGraphs player identifier; treated as a source-specific alias, not a stable key.
+- **Identity key (`identity_key`)**: FanGraphs-derived identity key used during identity resolution:
+  - `fgid` if present, else a stable synthetic key (`no_fgid_<hash>`).
 
 ---
 
@@ -144,6 +146,8 @@ All canonical modeling tables in this project are keyed by **MLBAM ID** (`mlbam_
 
 FanGraphs player IDs (`fgid`) and player names are treated as **source-specific identifiers** and are never used as primary keys in modeling tables.
 
+**Grain rule (binding):** any table that stores year-varying attributes (e.g., position, height, weight, bats/throws) must be keyed by `(mlbam_id, report_year)`.
+
 ---
 
 ### Stage A: MLBAM People Spine Construction
@@ -175,7 +179,7 @@ FanGraphs ingestion and parsing stages identify players via:
 To bridge FanGraphs-derived data with MLBAM-keyed modeling tables, the project includes an explicit **identity mapping step**.
 
 #### Mapping Inputs
-- FanGraphs-derived identities (`fgid`, `player_name`)
+- FanGraphs-derived identities (`identity_key`, `fgid`, `player_name`)
 - MLBAM people spine (name + DOB)
 
 #### Matching Strategy (Deterministic, Ordered)
@@ -192,20 +196,45 @@ Each FG identity is assigned one of:
 - `matched_exact_name_dob`
 - `matched_lastname_dob`
 - `matched_name_only_unique`
+- `matched_name_with_tiebreak` (unique match after explicit, documented tiebreak)
 - `ambiguous_multiple_candidates`
 - `unmatched_no_candidate`
 
 #### Output
 data/intermediate/identity_map_fgid_to_mlbam.csv
 
-
 This table is an explicit dependency for all downstream joins.
+
+---
+
+### Stage C: FanGraphs season snapshots (identity_key → mlbam_id, report_year)
+
+FanGraphs parsing produces season-varying snapshot fields (e.g., position, bats/throws, height/weight, age-as-of report). These must not be stored only at the identity grain.
+
+Accordingly, two additional derived artifacts exist:
+
+1. **FanGraphs identity list (identity-grain; for mapping inputs only)**  
+   Output: `data/processed/player_identities.csv`  
+   - One row per `identity_key`  
+   - May aggregate provenance across seasons  
+   - Not a modeling feature source for year-varying attributes
+
+2. **FanGraphs season snapshot table (season-grain; pre-MLBAM)**  
+   Output: `data/processed/player_identity_seasons.csv`  
+   - One row per `(identity_key, report_year)`  
+   - Holds FanGraphs season-varying snapshot fields (when present)
+
+3. **FanGraphs season snapshot table (season-grain; MLBAM-keyed)**  
+   Output: `data/processed/player_season_fangraphs.csv`  
+   - One row per `(mlbam_id, report_year)`  
+   - Built by joining `player_identity_seasons.csv` with `identity_map_fgid_to_mlbam.csv`  
+   - Intended as a direct input to canonical `(mlbam_id, report_year)` modeling builds
 
 ---
 
 ### Canonical Usage Rules
 
-- All modeling tables (`player_season`, `player_season_stats`, etc.) require a resolved `mlbam_id`.
+- All canonical modeling tables (`player_season`, `player_season_stats`, etc.) require a resolved `mlbam_id`.
 - `fgid` is retained only for traceability and debugging.
 - Rows without a resolved `mlbam_id` are excluded from supervised modeling joins but may be retained for diagnostics or future resolution.
 
@@ -258,7 +287,6 @@ Revisions must be recorded in `RESEARCH_LOG.md` and, if binding, in `DESIGN_DECI
 
 ## Evaluation Protocol (Operational)
 
-Protocol C is used:
 - Primary: forward-chaining by year
 - Secondary: player-holdout robustness checks
 
