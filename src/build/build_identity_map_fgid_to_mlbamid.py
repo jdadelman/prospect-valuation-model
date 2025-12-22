@@ -334,6 +334,17 @@ def main() -> None:
     idx_last_dob: dict[tuple[str, str, str, str], list[str]] = {}
     idx_full_name: dict[tuple[str], list[str]] = {}
 
+    # Rule 4 index (spine): last + yob_est
+    idx_last_yob: dict[tuple[str, str], list[str]] = {}
+
+    # Ancillary-only indexes (curated reference)
+    idx_anc_first_last_dob: dict[tuple[str, str, str, str, str], list[str]] = {}
+    idx_anc_last_dob: dict[tuple[str, str, str, str], list[str]] = {}
+    idx_anc_full_name: dict[tuple[str], list[str]] = {}
+
+    # Rule 4 index (ancillary): last + yob_est
+    idx_anc_last_yob: dict[tuple[str, str], list[str]] = {}
+
     # Aux maps for tie-breaks (spine + ancillary for DOB/YOB; orgs only from spine)
     yob_by_id: dict[str, str] = {}
     dob_by_id: dict[str, Optional[date]] = {}
@@ -350,6 +361,8 @@ def main() -> None:
             add_to_index(idx_first_last_dob, (fn, ln, y, m, d), s.mlbam_id)
         if ln and y and m and d:
             add_to_index(idx_last_dob, (ln, y, m, d), s.mlbam_id)
+        if ln and y:
+            add_to_index(idx_last_yob, (ln, y), s.mlbam_id)
 
         if full:
             add_to_index(idx_full_name, (full,), s.mlbam_id)
@@ -374,9 +387,10 @@ def main() -> None:
             add_to_index(idx_first_last_dob, (fn, ln, y, m, d), a.mlbam_id)
         if ln and y and m and d:
             add_to_index(idx_last_dob, (ln, y, m, d), a.mlbam_id)
-
         if full:
             add_to_index(idx_full_name, (full,), a.mlbam_id)
+        if ln and y:
+            add_to_index(idx_anc_last_yob, (ln, y), a.mlbam_id)
 
         # populate yob/dob maps if missing
         if a.mlbam_id not in yob_by_id or not yob_by_id.get(a.mlbam_id, ""):
@@ -438,7 +452,7 @@ def main() -> None:
                     match_method = "exact_name_dob"
                     match_status = "matched_exact_name_dob"
 
-            # Rule 2: exact last + full DOB (spine+ancillary)  <-- FIXED
+            # Rule 2: exact last + full DOB (spine+ancillary)
             if not mlbam_id and has_dob:
                 candidates = idx_last_dob.get((last_norm, y, m, d), [])
                 u = unique_or_none(candidates)
@@ -447,7 +461,7 @@ def main() -> None:
                     match_method = "lastname_dob"
                     match_status = "matched_lastname_dob"
 
-            # Rule 3: full-name rule (+ tie-breaks if ambiguous) (spine+ancillary)  <-- FIXED
+            # Rule 3: full-name rule (+ tie-breaks if ambiguous) (spine+ancillary)
             if not mlbam_id:
                 candidates = idx_full_name.get((full_norm,), [])
                 cand_unique = sorted(set(candidates))
@@ -502,7 +516,32 @@ def main() -> None:
 
                     if chosen:
                         mlbam_id = chosen
+            
+            # Rule 4: last-name-only + estimated YOB (very last resort; only accept unique)
+            if not mlbam_id:
+                # prefer explicit estimated YOB; fall back to derived from dob_est_ymd
+                yob_est = (ident.yob_est or "").strip()
+                if not (yob_est.isdigit() and len(yob_est) == 4):
+                    # if yob_est missing but dob_est_ymd exists, derive it
+                    d_est = parse_date_ymd(ident.dob_est_ymd)
+                    if d_est is not None:
+                        yob_est = str(d_est.year)
 
+                if yob_est.isdigit():
+                    # last name from identity
+                    _, last_norm = split_first_last(ident.player_name)
+                    if last_norm:
+                        candidates = []
+                        candidates.extend(idx_last_yob.get((last_norm, yob_est), []))
+                        if ancillary:
+                            candidates.extend(idx_anc_last_yob.get((last_norm, yob_est), []))
+
+                        u = unique_or_none(candidates)
+                        if u:
+                            mlbam_id = u
+                            match_method = "lastname_plus_yob_est_unique"
+                            match_status = "matched_lastname_plus_yob_est_unique"
+            
             if mlbam_id:
                 matched += 1
                 by_status[match_status] = by_status.get(match_status, 0) + 1
