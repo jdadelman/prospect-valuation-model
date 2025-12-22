@@ -232,20 +232,18 @@ def estimate_dob_from_pub_and_age(published_date_latest: str, age_float: str) ->
 
 def build_identities(reports_dir: Path) -> list[IdentityAgg]:
     by_key: dict[str, IdentityAgg] = {}
-    season_rows: list[dict[str, str]] = []
 
-    # Build auxiliary index from tools_*.csv: (fgid, report_year, rk) -> meta fields
-    tools_by_key: dict[tuple[str, int, int], dict[str, str]] = {}
+    # Build auxiliary index from tools_*.csv: fgid -> list of meta_age floats
+    age_by_fgid: dict[str, list[float]] = defaultdict(list)
     for tools_path in iter_tools_csvs(reports_dir):
-        # Infer report_year from filename: tools_<slug>.csv does not directly encode year reliably
-        # join via reports rows (rk+fgid+report_year); storing per-file keyed by (fgid,rk).
-        # report_year attached during the reports pass.
         for row in read_tools_rows(tools_path):
             fgid = row.get("fgid", "").strip()
-            rk = parse_int(row.get("rk", ""))
-            if not fgid or rk is None:
+            if not fgid:
                 continue
-            tools_by_key[(fgid, -1, rk)] = row  # placeholder year; fixed during reports pass
+            age = parse_float(row.get("meta_age", ""))
+            if age is not None:
+                age_by_fgid[fgid].append(age)
+
 
     for csv_path in iter_report_csvs(reports_dir):
         for row in read_reports_rows(csv_path):
@@ -339,7 +337,19 @@ def build_identity_seasons(reports_dir: Path) -> list[dict[str, str]]:
         tools_index_by_file[tools_path.name] = per_file
 
     out: list[dict[str, str]] = []
+    by_key: dict[str, IdentityAgg] = {}
 
+    # Build auxiliary index from tools_*.csv: fgid -> list of meta_age floats
+    age_by_fgid: dict[str, list[float]] = defaultdict(list)
+    for tools_path in iter_tools_csvs(reports_dir):
+        for row in read_tools_rows(tools_path):
+            fgid = row.get("fgid", "").strip()
+            if not fgid:
+                continue
+            age = parse_float(row.get("meta_age", ""))
+            if age is not None:
+                age_by_fgid[fgid].append(age)
+    
     for csv_path in iter_report_csvs(reports_dir):
         # Determine corresponding tools filename (same slug pattern):
         # reports_<slug>.csv -> tools_<slug>.csv
@@ -505,6 +515,7 @@ def main() -> None:
         raise SystemExit(f"reports-dir not found: {reports_dir}")
 
     identities = build_identities(reports_dir)
+    n_total = len(identities)    
     out_path = Path(args.out)
     write_identities(identities, out_path)
     print(f"[OK] Wrote {n_total} identities -> {out_path}")
