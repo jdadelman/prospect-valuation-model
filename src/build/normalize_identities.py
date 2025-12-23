@@ -131,7 +131,7 @@ def iter_tools_csvs(indir: Path) -> Iterable[Path]:
 def read_reports_rows(path: Path) -> Iterable[dict[str, str]]:
     with path.open("r", newline="", encoding="utf-8") as f:
         r = csv.DictReader(f)
-        required = {"rk", "fgid", "player_name", "player_url", "org_label", "report_year", "published_date"}
+        required = {"rk", "fgid", "player_name", "player_url", "org_label", "report_year", "published_date", "source_url"}
         missing = required - set(r.fieldnames or [])
         if missing:
             raise RuntimeError(f"{path}: missing required columns: {sorted(missing)}")
@@ -390,6 +390,7 @@ def build_identity_seasons(reports_dir: Path) -> list[dict[str, str]]:
                     "org_label": org_label,
                     "org_abbrev": org_abbrev,
                     "published_date": published_date,
+                    "source_url": (row.get("source_url") or "").strip(),
                     "meta_age": (trow.get("meta_age") or "").strip(),
                     "meta_height": (trow.get("meta_height") or "").strip(),
                     "meta_weight": (trow.get("meta_weight") or "").strip(),
@@ -470,6 +471,7 @@ def write_identity_seasons(rows: list[dict[str, str]], out_path: Path) -> None:
         "org_label",
         "org_abbrev",
         "published_date",
+        "source_url",
         "meta_age",
         "meta_height",
         "meta_weight",
