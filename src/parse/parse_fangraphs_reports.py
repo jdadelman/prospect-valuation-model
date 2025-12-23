@@ -74,6 +74,30 @@ def infer_report_year_from_url(url: str) -> Optional[int]:
     return int(m.group(1)) if m else None
 
 
+def infer_report_year(
+    source_url: str,
+    published_date: str,
+    html_path: Optional[Path] = None,
+) -> int:
+    """
+    Prefer list-year embedded in the canonical URL (e.g. ...-2024/).
+    Fall back to publication year if list-year cannot be inferred.
+
+    This aligns report_year with the Top Prospects list year rather than pub year.
+    """
+    if source_url:
+        y = infer_report_year_from_url(source_url)
+        if y is not None:
+            return y
+
+    if html_path is not None:
+        y = infer_report_year_from_url(html_path.name)
+        if y is not None:
+            return y
+
+    return report_year_from_published(published_date)
+
+
 def extract_canonical_url(soup: BeautifulSoup) -> str:
     link = soup.find("link", attrs={"rel": "canonical"})
     if link and link.get("href"):
@@ -680,7 +704,7 @@ def main() -> None:
     source_url = extract_canonical_url(soup)
     org_label = extract_org_label(soup)
     published_date = extract_date_published(soup)
-    report_year = report_year_from_published(published_date)
+    report_year = infer_report_year(source_url=source_url, published_date=published_date, html_path=html_path)
     outdir = Path(args.outdir)
 
     summary_by_fgid, summary_by_rk = parse_summary_table(soup)
