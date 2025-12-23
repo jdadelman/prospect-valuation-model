@@ -150,13 +150,7 @@ def choose_best(rows: list[SeasonRow]) -> SeasonRow:
 def build_player_season_fangraphs(
     identity_seasons_csv: Path,
     identity_map_csv: Path,
-) -> tuple[list[str], list[dict[str, str]], dict[str, int]]:
-    """
-    Returns:
-      - output_fieldnames
-      - output_rows (deduped)
-      - stats dict
-    """
+) -> tuple[list[str], list[dict[str, str]], dict[str, int], list[str], list[dict[str, str]]]:
     id_map = load_identity_map(identity_map_csv)
 
     # Collect candidates per (mlbam_id, report_year)
@@ -179,6 +173,23 @@ def build_player_season_fangraphs(
     out_rows: list[dict[str, str]] = []
     collisions = 0
     dropped = 0
+    collisions_rows: list[dict[str, str]] = []
+    collisions_fieldnames = [
+        "mlbam_id",
+        "report_year",
+        "n_candidates",
+        "is_chosen",
+        "selection_key",
+        "identity_key",
+        "fgid",
+        "rk",
+        "published_date",
+        "org_label",
+        "org_abbrev",
+        "player_name",
+        "player_url",
+    ]
+
 
     # Determine union of all columns present in identity season rows, so we can carry them through.
     # Prepend mlbam_id + report_year as canonical keys.
@@ -190,9 +201,35 @@ def build_player_season_fangraphs(
         if len(candidates) > 1:
             collisions += 1
             dropped += (len(candidates) - 1)
+
         chosen = choose_best(candidates)
         chosen_by_key[key] = chosen
         union_cols.update(chosen.row.keys())
+
+        if len(candidates) > 1:
+            mlbam_id, report_year = key
+            ordered = sorted(candidates, key=selection_key)
+            n_cand = len(ordered)
+
+            for sr in ordered:
+                r = sr.row
+                collisions_rows.append(
+                    {
+                        "mlbam_id": str(mlbam_id),
+                        "report_year": str(report_year),
+                        "n_candidates": str(n_cand),
+                        "is_chosen": "1" if sr is chosen else "0",
+                        "selection_key": str(selection_key(sr)),
+                        "identity_key": sr.identity_key,
+                        "fgid": sr.fgid,
+                        "rk": "" if sr.rk is None else str(sr.rk),
+                        "published_date": sr.published_date,
+                        "org_label": (r.get("org_label") or "").strip(),
+                        "org_abbrev": (r.get("org_abbrev") or "").strip(),
+                        "player_name": (r.get("player_name") or "").strip(),
+                        "player_url": (r.get("player_url") or "").strip(),
+                    }
+                )
 
     # Construct output schema: canonical keys first, then a stable set of carried columns.
     carried = sorted(c for c in union_cols if c not in {"identity_key"})
@@ -213,9 +250,10 @@ def build_player_season_fangraphs(
         "unique_mlbam_year_keys": len(buckets),
         "collisions_mlbam_year": collisions,
         "dropped_due_to_dedup": dropped,
+        "collision_candidate_rows": len(collisions_rows),
         "output_rows": len(out_rows),
     }
-    return output_fieldnames, out_rows, stats
+    return output_fieldnames, out_rows, stats, collisions_fieldnames, collisions_rows
 
 
 def write_csv(path: Path, fieldnames: list[str], rows: list[dict[str, str]]) -> None:
@@ -263,6 +301,11 @@ def main() -> None:
         default="data/processed/player_season_fangraphs_manifest.csv",
         help="Output manifest CSV with counts and dedupe stats.",
     )
+    ap.add_argument(
+        "--collisions-out",
+        default="data/processed/player_season_fangraphs_collisions.csv",
+        help="Output CSV listing all candidate rows for collided (mlbam_id, report_year) keys.",
+    )
     args = ap.parse_args()
 
     identity_seasons_csv = Path(args.identity_seasons)
@@ -275,11 +318,15 @@ def main() -> None:
     if not id_map_csv.exists():
         raise SystemExit(f"id-map not found: {id_map_csv}")
 
-    fieldnames, out_rows, stats = build_player_season_fangraphs(
+    fieldnames, out_rows, stats, collisions_fieldnames, collisions_rows = build_player_season_fangraphs(
         identity_seasons_csv=identity_seasons_csv,
         identity_map_csv=id_map_csv,
     )
     write_csv(out_csv, fieldnames, out_rows)
+
+    collisions_out = Path(args.collisions_out)
+    if collisions_rows:
+        write_csv(collisions_out, collisions_fieldnames, collisions_rows)
 
     notes = (
         "Deduping policy: prefer rows with fgid present; then later published_date; "
@@ -290,6 +337,9 @@ def main() -> None:
 
     print(f"[OK] Wrote player_season_fangraphs: {out_csv}")
     print(f"[OK] Wrote manifest:              {manifest_csv}")
+    if collisions_rows:
+        print(f"[OK] Wrote collisions:           {collisions_out}")
+
     for k in sorted(stats.keys()):
         print(f"[INFO] {k}={stats[k]}")
 
