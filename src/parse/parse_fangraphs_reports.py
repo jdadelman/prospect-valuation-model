@@ -155,25 +155,37 @@ def extract_date_published(soup: BeautifulSoup) -> str:
 
 def report_year_from_published(published: str) -> int:
     """
-    Derive report year from publication date string.
-    Accepts ISO-8601 variants like '2024-02-05T12:34:56+00:00' or '2024-02-05'.
+    Derive report year from publication datetime/date string.
+
+    Rubric:
+      - If published month is Oct (10) or later, treat as NEXT report year.
+      - Else, treat as same-year report year.
+
+    This is a fallback when the canonical URL does not encode the report year.
     """
     if not published:
         raise RuntimeError("Missing published date; cannot infer report_year.")
-    # Normalize a few common formats
+
     s = published.strip()
-    # datetime.fromisoformat handles many ISO variants but not all; strip trailing 'Z'
     if s.endswith("Z"):
         s = s[:-1]
+
+    dt: Optional[datetime] = None
     try:
         dt = datetime.fromisoformat(s)
-        return dt.year
     except Exception:
-        # Try YYYY-MM-DD prefix
         m = re.match(r"^\s*(20\d{2})-(\d{2})-(\d{2})", published)
         if m:
-            return int(m.group(1))
-    raise RuntimeError(f"Could not parse published date format: {published!r}")
+            y = int(m.group(1))
+            mo = int(m.group(2))
+            # Day not needed for rubric
+            return (y + 1) if mo >= 10 else y
+        raise RuntimeError(f"Could not parse published date format: {published!r}")
+
+    y = dt.year
+    mo = dt.month
+    return (y + 1) if mo >= 10 else y
+
 
 
 def extract_org_label(soup: BeautifulSoup) -> str:
@@ -690,8 +702,10 @@ def main() -> None:
     source_url = extract_canonical_url(soup)
     org_label = extract_org_label(soup)
     published_date = extract_date_published(soup)
-    report_year = infer_report_year(source_url=source_url, published_date=published_date, html_path=html_path)
-    outdir = Path(args.outdir)
+    report_year = infer_report_year_from_url(source_url) if source_url else None
+    if report_year is None:
+        report_year = report_year_from_published(published_date)
+        outdir = Path(args.outdir)
 
     summary_by_fgid, summary_by_rk = parse_summary_table(soup)
     report_rows, tools_rows = parse_report_blocks(soup, summary_by_fgid, summary_by_rk)
