@@ -333,16 +333,11 @@ def main() -> None:
     idx_first_last_dob: dict[tuple[str, str, str, str, str], list[str]] = {}
     idx_last_dob: dict[tuple[str, str, str, str], list[str]] = {}
     idx_full_name: dict[tuple[str], list[str]] = {}
-
-    # Rule 4 index (spine): last + yob_est
     idx_last_yob: dict[tuple[str, str], list[str]] = {}
 
-    # Ancillary-only indexes (curated reference)
     idx_anc_first_last_dob: dict[tuple[str, str, str, str, str], list[str]] = {}
     idx_anc_last_dob: dict[tuple[str, str, str, str], list[str]] = {}
     idx_anc_full_name: dict[tuple[str], list[str]] = {}
-
-    # Rule 4 index (ancillary): last + yob_est
     idx_anc_last_yob: dict[tuple[str, str], list[str]] = {}
 
     # Aux maps for tie-breaks (spine + ancillary for DOB/YOB; orgs only from spine)
@@ -384,11 +379,11 @@ def main() -> None:
 
         y, m, d = (a.yob.strip(), a.mob.strip(), a.dob.strip())
         if fn and ln and y and m and d:
-            add_to_index(idx_first_last_dob, (fn, ln, y, m, d), a.mlbam_id)
+            add_to_index(idx_anc_first_last_dob, (fn, ln, y, m, d), a.mlbam_id)
         if ln and y and m and d:
-            add_to_index(idx_last_dob, (ln, y, m, d), a.mlbam_id)
+            add_to_index(idx_anc_last_dob, (ln, y, m, d), a.mlbam_id)
         if full:
-            add_to_index(idx_full_name, (full,), a.mlbam_id)
+            add_to_index(idx_anc_full_name, (full,), a.mlbam_id)
         if ln and y:
             add_to_index(idx_anc_last_yob, (ln, y), a.mlbam_id)
 
@@ -442,11 +437,16 @@ def main() -> None:
             match_method: str = ""
             match_status: str = ""
             candidates: list[str] = []
+            candidates_by_rule: dict[str, list[str]] = {}
 
             # Rule 1: exact normalized first+last + full DOB (spine+ancillary)
             if has_dob:
-                candidates = idx_first_last_dob.get((first_norm, last_norm, y, m, d), [])
-                u = unique_or_none(candidates)
+                cand = []
+                cand.extend(idx_first_last_dob.get((first_norm, last_norm, y, m, d), []))
+                cand.extend(idx_anc_first_last_dob.get((first_norm, last_norm, y, m, d), []))
+                candidates_by_rule["exact_name_dob"] = cand
+
+                u = unique_or_none(cand)
                 if u:
                     mlbam_id = u
                     match_method = "exact_name_dob"
@@ -454,8 +454,12 @@ def main() -> None:
 
             # Rule 2: exact last + full DOB (spine+ancillary)
             if not mlbam_id and has_dob:
-                candidates = idx_last_dob.get((last_norm, y, m, d), [])
-                u = unique_or_none(candidates)
+                cand = []
+                cand.extend(idx_last_dob.get((last_norm, y, m, d), []))
+                cand.extend(idx_anc_last_dob.get((last_norm, y, m, d), []))
+                candidates_by_rule["lastname_dob"] = cand
+
+                u = unique_or_none(cand)
                 if u:
                     mlbam_id = u
                     match_method = "lastname_dob"
@@ -463,9 +467,13 @@ def main() -> None:
 
             # Rule 3: full-name rule (+ tie-breaks if ambiguous) (spine+ancillary)
             if not mlbam_id:
-                candidates = idx_full_name.get((full_norm,), [])
-                cand_unique = sorted(set(candidates))
-                u = unique_or_none(candidates)
+                cand = []
+                cand.extend(idx_full_name.get((full_norm,), []))
+                cand.extend(idx_anc_full_name.get((full_norm,), []))
+                candidates_by_rule["name_only"] = cand
+
+                cand_unique = sorted(set(cand))
+                u = unique_or_none(cand)
 
                 if u:
                     mlbam_id = u
@@ -531,26 +539,31 @@ def main() -> None:
                     # last name from identity
                     _, last_norm = split_first_last(ident.player_name)
                     if last_norm:
-                        candidates = []
-                        candidates.extend(idx_last_yob.get((last_norm, yob_est), []))
-                        if ancillary:
-                            candidates.extend(idx_anc_last_yob.get((last_norm, yob_est), []))
+                        cand = []
+                        cand.extend(idx_last_yob.get((last_norm, yob_est), []))
+                        cand.extend(idx_anc_last_yob.get((last_norm, yob_est), []))
+                        candidates_by_rule["lastname_plus_yob_est"] = cand
 
-                        u = unique_or_none(candidates)
+                        u = unique_or_none(cand)
                         if u:
                             mlbam_id = u
                             match_method = "lastname_plus_yob_est_unique"
                             match_status = "matched_lastname_plus_yob_est_unique"
             
+            all_candidates: list[str] = []
+            for v in candidates_by_rule.values():
+                all_candidates.extend(v)
+            all_candidates_unique = sorted(set(all_candidates))
+
             if mlbam_id:
                 matched += 1
                 by_status[match_status] = by_status.get(match_status, 0) + 1
             else:
-                # classify ambiguity/unmatched based on candidates at the final attempted rule
-                if candidates and len(set(candidates)) > 1:
+                is_ambiguous = len(all_candidates_unique) > 1
+                if is_ambiguous:
                     ambiguous += 1
                     match_status = "ambiguous_multiple_candidates"
-                    match_method = "name_only"
+                    match_method = "none"
                     by_status[match_status] = by_status.get(match_status, 0) + 1
                 else:
                     unmatched += 1
@@ -572,7 +585,7 @@ def main() -> None:
                     "mlbam_id": mlbam_id,
                     "match_status": match_status,
                     "match_method": match_method,
-                    "candidate_mlbam_ids": "|".join(sorted(set(candidates))) if candidates else "",
+                    "candidate_mlbam_ids": "|".join(all_candidates_unique) if all_candidates_unique else "",
                     "matched_mlbam_id": mlbam_id,
                     "identity_yob": y,
                     "identity_mob": m,
