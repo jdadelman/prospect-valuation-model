@@ -9,7 +9,7 @@ from pathlib import Path
 from statistics import mean
 from typing import Iterable, Optional
 
-from src.utils.text import norm_space, parse_int
+from src.utils.text import norm_space, parse_int, split_first_last_person
 
 
 def normalize_name_for_match(name: str) -> str:
@@ -248,7 +248,7 @@ def build_identities(reports_dir: Path) -> list[IdentityAgg]:
                 identity_key = stable_fallback_id(player_name, player_url)
 
             if identity_key not in by_key:
-                first, last = split_first_last(player_name)
+                first, last = split_first_last_person(player_name)
                 by_key[identity_key] = IdentityAgg(
                     identity_key=identity_key,
                     fgid=fgid,
@@ -275,7 +275,7 @@ def build_identities(reports_dir: Path) -> list[IdentityAgg]:
             if not agg.player_name and player_name:
                 agg.player_name = player_name
                 agg.name_norm = normalize_name_for_match(player_name)
-                agg.first_name, agg.last_name = split_first_last(player_name)
+                agg.first_name, agg.last_name = split_first_last_person(player_name)
 
             if not agg.player_url and player_url:
                 agg.player_url = player_url

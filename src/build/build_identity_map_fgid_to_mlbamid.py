@@ -6,6 +6,12 @@ from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable, Optional
 
+from src.utils.text import (
+    norm_space as _norm_text_base,
+    normalize_person_name_for_match,
+    split_first_last_person,
+)
+
 
 def utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
@@ -18,16 +24,7 @@ def strip_accents(s: str) -> str:
 
 
 def norm_text(s: str) -> str:
-    """
-    Lowercase, strip accents, collapse whitespace, drop punctuation-ish separators.
-    Intended for stable joins, not display.
-    """
-    s = strip_accents(s).casefold()
-    s = s.strip()
-    for ch in ["-", ".", ",", "'", "’", "`", '"', "(", ")", "[", "]", "{", "}", "/", "\\", "|", ":", ";"]:
-        s = s.replace(ch, " ")
-    s = " ".join(s.split())
-    return s
+    return _norm_text_base(strip_accents(s))
 
 
 def split_first_last(full_name: str) -> tuple[str, str]:
@@ -350,7 +347,7 @@ def main() -> None:
     for s in spine:
         fn = norm_text(s.name_first)
         ln = norm_text(s.name_last)
-        full = norm_text(f"{s.name_first} {s.name_last}")
+        full = normalize_person_name_for_match(f"{s.name_first} {s.name_last}")
         if s.mlbam_id not in first_initial_by_id and fn:
             first_initial_by_id[s.mlbam_id] = fn[0]
 
@@ -378,7 +375,8 @@ def main() -> None:
     for a in ancillary:
         fn = norm_text(a.first)
         ln = norm_text(a.last)
-        full = norm_text(f"{a.first} {a.last}")
+        full = normalize_person_name_for_match(f"{a.first} {a.last}")
+        
         if a.mlbam_id not in first_initial_by_id and fn:
             first_initial_by_id[a.mlbam_id] = fn[0]
 
@@ -432,8 +430,8 @@ def main() -> None:
         w.writeheader()
 
         for ident in identities:
-            first_norm, last_norm = split_first_last(ident.player_name)
-            full_norm = norm_text(ident.player_name)
+            first_norm, last_norm = split_first_last_person(ident.player_name)
+            full_norm = normalize_person_name_for_match(ident.player_name)
 
             y, m, d = ident.yob.strip(), ident.mob.strip(), ident.dob.strip()
             has_dob = bool(y and m and d)
