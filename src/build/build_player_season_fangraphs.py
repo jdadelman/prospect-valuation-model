@@ -110,23 +110,31 @@ def iter_season_rows(path: Path) -> Iterable[SeasonRow]:
         )
 
 
-def selection_key(sr: SeasonRow) -> tuple[int, int, int, str]:
+def selection_key(sr: SeasonRow) -> tuple[int, int, int, int, str]:
     """
     Smaller is better (because we sort ascending).
-      1) has_fgid (prefer 1 -> encode as 0)
-      2) published_date_latest (prefer later -> encode as negative unix-ish ordering proxy)
+
+    Primary policy: most recent published_date wins (trade / org-change collisions).
+    Secondary: prefer rows with fgid present (parsing integrity).
+    Then: smaller rk (higher-ranked entry).
+    Then: stable identity_key.
+
+      1) published_date_latest (prefer later -> encode as negative timestamp)
+      2) has_fgid (prefer 0)
       3) rk (prefer smaller)
       4) identity_key (stable)
     """
-    has_fgid = 0 if sr.fgid else 1  # 0 preferred
     dt = parse_isoish_date(sr.published_date)
-    # For ordering, later is better; invert via negative timestamp where possible.
     if dt is not None:
         pub_ord = -int(dt.timestamp())
+        has_pub = 0
     else:
-        pub_ord = 0  # unknown: neutral / not preferred over known-later due to has_fgid gate + rk
+        pub_ord = 0
+        has_pub = 1  # unknown published_date should lose to known dates
+
+    has_fgid = 0 if sr.fgid else 1
     rk = sr.rk if sr.rk is not None else 10**9
-    return (has_fgid, pub_ord, rk, sr.identity_key)
+    return (has_pub, pub_ord, has_fgid, rk, sr.identity_key)
 
 
 def choose_best(rows: list[SeasonRow]) -> SeasonRow:
