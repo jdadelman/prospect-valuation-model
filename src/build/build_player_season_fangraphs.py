@@ -5,19 +5,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Iterable, Optional
 
-
-def norm_space(s: str) -> str:
-    return " ".join((s or "").strip().split())
-
-
-def parse_int(s: str) -> Optional[int]:
-    s = (s or "").strip()
-    if not s:
-        return None
-    try:
-        return int(s)
-    except ValueError:
-        return None
+from src.utils.text import parse_int
 
 
 def parse_isoish_date(s: str) -> Optional[datetime]:

@@ -9,9 +9,7 @@ from pathlib import Path
 from statistics import mean
 from typing import Iterable, Optional
 
-
-def norm_space(s: str) -> str:
-    return " ".join((s or "").strip().split())
+from src.utils.text import norm_space, parse_int
 
 
 def normalize_name_for_match(name: str) -> str:
@@ -162,16 +160,6 @@ def read_tools_rows(path: Path) -> Iterable[dict[str, str]]:
                 else:
                     out[k] = ""
             yield out
-
-
-def parse_int(s: str) -> Optional[int]:
-    s = (s or "").strip()
-    if not s:
-        return None
-    try:
-        return int(s)
-    except ValueError:
-        return None
 
 
 def parse_float(s: str) -> Optional[float]:

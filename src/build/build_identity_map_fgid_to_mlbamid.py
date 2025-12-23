@@ -344,12 +344,15 @@ def main() -> None:
     yob_by_id: dict[str, str] = {}
     dob_by_id: dict[str, Optional[date]] = {}
     orgs_by_id: dict[str, set[str]] = {}
+    first_initial_by_id: dict[str, str] = {}
 
     # --- Spine contribution ---
     for s in spine:
         fn = norm_text(s.name_first)
         ln = norm_text(s.name_last)
         full = norm_text(f"{s.name_first} {s.name_last}")
+        if s.mlbam_id not in first_initial_by_id and fn:
+            first_initial_by_id[s.mlbam_id] = fn[0]
 
         y, m, d = (s.yob.strip(), s.mob.strip(), s.dob.strip())
         if fn and ln and y and m and d:
@@ -376,6 +379,8 @@ def main() -> None:
         fn = norm_text(a.first)
         ln = norm_text(a.last)
         full = norm_text(f"{a.first} {a.last}")
+        if a.mlbam_id not in first_initial_by_id and fn:
+            first_initial_by_id[a.mlbam_id] = fn[0]
 
         y, m, d = (a.yob.strip(), a.mob.strip(), a.dob.strip())
         if fn and ln and y and m and d:
@@ -527,28 +532,50 @@ def main() -> None:
             
             # Rule 4: last-name-only + estimated YOB (very last resort; only accept unique)
             if not mlbam_id:
-                # prefer explicit estimated YOB; fall back to derived from dob_est_ymd
                 yob_est = (ident.yob_est or "").strip()
                 if not (yob_est.isdigit() and len(yob_est) == 4):
-                    # if yob_est missing but dob_est_ymd exists, derive it
                     d_est = parse_date_ymd(ident.dob_est_ymd)
                     if d_est is not None:
                         yob_est = str(d_est.year)
 
                 if yob_est.isdigit():
-                    # last name from identity
-                    _, last_norm = split_first_last(ident.player_name)
-                    if last_norm:
-                        cand = []
-                        cand.extend(idx_last_yob.get((last_norm, yob_est), []))
-                        cand.extend(idx_anc_last_yob.get((last_norm, yob_est), []))
-                        candidates_by_rule["lastname_plus_yob_est"] = cand
+                    first_norm, last_norm = split_first_last(ident.player_name)
+                    first_initial = first_norm[0] if first_norm else ""
 
-                        u = unique_or_none(cand)
-                        if u:
-                            mlbam_id = u
-                            match_method = "lastname_plus_yob_est_unique"
-                            match_status = "matched_lastname_plus_yob_est_unique"
+                    if last_norm:
+                        candidates = []
+                        candidates.extend(idx_last_yob.get((last_norm, yob_est), []))
+                        if ancillary:
+                            candidates.extend(idx_anc_last_yob.get((last_norm, yob_est), []))
+
+                        cand_unique = sorted(set(candidates))
+
+                        # Guard A: org intersection when identity has orgs and candidate has org provenance
+                        ident_orgs = [x for x in ident.org_abbrevs.split("|") if x.strip()]
+                        if ident_orgs and cand_unique:
+                            hits = []
+                            for cid in cand_unique:
+                                orgs = orgs_by_id.get(cid, set())
+                                if orgs and any(o in orgs for o in ident_orgs):
+                                    hits.append(cid)
+                            hits = sorted(set(hits))
+                            if len(hits) == 1:
+                                mlbam_id = hits[0]
+                                match_method = "lastname_plus_yob_est_plus_org_unique"
+                                match_status = "matched_lastname_plus_yob_est_unique"
+
+                        # Guard B: first-initial match
+                        if not mlbam_id and first_initial and cand_unique:
+                            hits = []
+                            for cid in cand_unique:
+                                fi = (first_initial_by_id.get(cid, "") or "").strip()
+                                if fi and fi == first_initial:
+                                    hits.append(cid)
+                            hits = sorted(set(hits))
+                            if len(hits) == 1:
+                                mlbam_id = hits[0]
+                                match_method = "lastname_plus_yob_est_plus_first_initial_unique"
+                                match_status = "matched_lastname_plus_yob_est_unique"
             
             all_candidates: list[str] = []
             for v in candidates_by_rule.values():

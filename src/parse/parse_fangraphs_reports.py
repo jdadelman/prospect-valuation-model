@@ -10,27 +10,13 @@ from urllib.parse import parse_qs, urlparse
 
 from bs4 import BeautifulSoup
 from bs4.element import Tag
+from src.utils.text import sanitize_key, slugify
+
 
 DATE_RE = re.compile(r"\bdatePublished\b\"?\s*:\s*\"([0-9]{4}-[0-9]{2}-[0-9]{2}[^\"}]*)\"", re.IGNORECASE)
 TOOL_CUR_FUT_RE = re.compile(r"^\s*(\d+(?:\.\d+)?)\s*/\s*(\d+(?:\.\d+)?)\s*$")
 BAT_THR_RE = re.compile(r"^\s*([LRS])\s*/\s*([LR])\s*$", re.IGNORECASE)
 SITS_TOPS_RE = re.compile(r"^\s*(\d{2,3})\s*[-–]\s*(\d{2,3})\s*/\s*(\d{2,3})\s*$")
-
-
-def sanitize_key(s: str) -> str:
-    """
-    Convert tool header strings into stable column keys.
-    Examples:
-      "Raw Power" -> "raw_power"
-      "Bat / Thr" -> "bat_thr"
-      "S..." -> "s"
-      "91-93 / 95" is a value, not a key.
-    """
-    s = s.strip().lower()
-    s = s.replace("/", " ")
-    s = re.sub(r"[^a-z0-9]+", "_", s)
-    s = re.sub(r"_+", "_", s).strip("_")
-    return s
 
 
 def parse_fgid_from_player_url(player_url: str) -> str:
@@ -722,13 +708,6 @@ def main() -> None:
 
     print(f"[OK] Wrote {len(report_rows)} report rows -> {reports_out}")
     print(f"[OK] Wrote {len(tools_rows)} tool rows   -> {tools_out}")
-
-
-def slugify(s: str) -> str:
-    s = s.strip().lower()
-    s = re.sub(r"[^a-z0-9]+", "-", s)
-    s = re.sub(r"-{2,}", "-", s).strip("-")
-    return s[:120] if len(s) > 120 else s
 
 
 if __name__ == "__main__":
