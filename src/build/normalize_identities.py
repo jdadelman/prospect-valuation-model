@@ -273,7 +273,7 @@ def build_identities(reports_dir: Path) -> list[IdentityAgg]:
                     org_labels=set(),
                     org_abbrevs=set(),
                     published_dates=set(),
-                    ages=[],
+                    ages=age_by_fgid.get(fgid, []).copy() if fgid else [],
                     source_files=set(),
                 )
 
@@ -304,10 +304,6 @@ def build_identities(reports_dir: Path) -> list[IdentityAgg]:
             if published_date:
                 agg.published_dates.add(published_date)
 
-            # Attach ages from tools index (FGID-only; if FGID missing, we cannot attach)
-            if agg.fgid:
-                agg.ages.extend(age_by_fgid.get(agg.fgid, []))
-
             agg.source_files.add(csv_path.name)
 
     # Deterministic order: real FGIDs first, then synthetic keys
@@ -337,7 +333,6 @@ def build_identity_seasons(reports_dir: Path) -> list[dict[str, str]]:
         tools_index_by_file[tools_path.name] = per_file
 
     out: list[dict[str, str]] = []
-    by_key: dict[str, IdentityAgg] = {}
 
     # Build auxiliary index from tools_*.csv: fgid -> list of meta_age floats
     age_by_fgid: dict[str, list[float]] = defaultdict(list)
