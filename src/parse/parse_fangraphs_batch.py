@@ -51,7 +51,7 @@ def main() -> None:
     html_files = sorted(indir.glob("*.html"))
     if not html_files:
         raise SystemExit(f"No .html files found in {indir}")
-
+    
     fieldnames = [
         "html_path",
         "slug",
@@ -78,7 +78,8 @@ def main() -> None:
                 "source_url": "",
                 "org_label": "",
                 "report_year": "",
-                "summary_rows": "",
+                "summary_rows_total": "",
+                "summary_rows_with_fgid": "",
                 "report_blocks": "",
                 "reports_csv": "",
                 "tools_csv": "",
@@ -98,7 +99,8 @@ def main() -> None:
                 summary_by_fgid, summary_by_rk = parse_summary_table(soup)
                 report_rows, tools_rows = parse_report_blocks(soup, summary_by_fgid, summary_by_rk)
 
-                row["summary_rows"] = str(len(summary_by_rk))
+                row["summary_rows_total"] = str(len(summary_by_rk))
+                row["summary_rows_with_fgid"] = str(len(summary_by_fgid))
                 row["report_blocks"] = str(len(report_rows))
 
                 reports_out = outdir / f"reports_{slug}.csv"
@@ -117,7 +119,6 @@ def main() -> None:
                 row["source_url"] = source_url
                 row["org_label"] = org_label
                 row["report_year"] = str(report_year)
-                row["summary_rows"] = str(len(summary_by_fgid))
                 row["report_blocks"] = str(len(report_rows))
                 row["reports_csv"] = str(reports_out.as_posix())
                 row["tools_csv"] = str(tools_out.as_posix())

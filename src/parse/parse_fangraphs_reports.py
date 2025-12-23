@@ -540,8 +540,8 @@ def parse_report_blocks(
                 fgid = parse_fgid_from_player_url(player_url_from_block)
             except Exception:
                 fgid = ""
-        
-                # Choose summary row: FGID > rank > positional fallback
+
+        # Choose summary row: FGID > rank > positional fallback
         srow: Optional[SummaryRow] = None
 
         if fgid and fgid in summary_by_fgid:
